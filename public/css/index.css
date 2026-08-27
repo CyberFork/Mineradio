@@ -444,7 +444,7 @@ body.desktop-shell #desktop-window-shell {
   display: block;
   position: fixed;
   inset: 0;
-  overflow: hidden;
+  overflow: clip;
   border-radius: 34px;
   clip-path: inset(0 round 34px);
   background: transparent;

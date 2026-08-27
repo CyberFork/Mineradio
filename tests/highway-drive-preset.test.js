@@ -26,6 +26,7 @@ assert.strictEqual(runtime.INDEX, 9, 'highway must occupy preset index 9');
 
 const api = runtime._test;
 assert.strictEqual(api.constants.bandCount, 8, 'road surface must expose all eight sonic bands');
+assert.strictEqual(api.constants.spectrumSampleCount, api.constants.segmentCount + 1, 'road spectrum history must cover every depth row without an unbounded buffer');
 assert(api.constants.segmentCount <= 128, 'road mesh must remain bounded');
 assert((api.constants.segmentCount + 1) * api.constants.columnCount <= 2200, 'road vertex budget must remain bounded');
 assert(api.constants.lightPairCount <= 32, 'roadside light instance budget must remain bounded');
@@ -51,8 +52,111 @@ assert.deepStrictEqual(
 assert(api.constants.precipitationCount <= 512, 'rain and snow must share one bounded particle pool');
 assert(api.constants.landmarkNames.length >= 8 && api.constants.landmarkNames.length <= 10, 'the roadside landmark series must be varied and bounded');
 assert(api.constants.landmarkNames.includes('Eiffel Tower') && api.constants.landmarkNames.includes('Taj Mahal'), 'globally recognizable landmarks must be present');
-assert.strictEqual(api.roadBandForSide(0), 0, 'sub-bass must live near the road center');
-assert.strictEqual(api.roadBandForSide(0.999), 7, 'air band must reach the road edge');
+assert.strictEqual(api.constants.trackLaneCount, 4, 'tap blocks must align with the four visible highway lanes');
+assert.strictEqual(api.constants.trackMinEventGap, 0.12, 'the observational chart must use the hard-mode minimum note gap');
+assert.strictEqual(api.constants.trackOnsetThreshold, 0.15, 'the observational chart must retain hard-mode onset sensitivity');
+assert.deepStrictEqual(
+  Array.from(api.constants.trackLaneBands, bands => Array.from(bands)),
+  [[0, 4], [2, 6], [3, 7], [1, 5]],
+  'eight frequency bands must feed four spatially distributed tap lanes'
+);
+assert.strictEqual(api.roadTrackLaneForBand(0), 0, 'sub-bass must reach the outer-left tap lane');
+assert.strictEqual(api.roadTrackLaneForBand(1), 3, 'bass must reach the outer-right tap lane');
+assert.strictEqual(api.roadTrackLaneForBand(2), 1, 'low-mid energy must occupy an inner tap lane');
+assert.strictEqual(api.roadTrackLaneForBand(3), 2, 'mid energy must occupy the opposite inner tap lane');
+assert(api.roadTrackLaneCenter(0) < -0.6 && api.roadTrackLaneCenter(3) > 0.6, 'outer tap lanes must span most of the road width');
+assert.strictEqual(api.roadTrackLaneForSide(-0.67), 0, 'the left road lane must resolve to the first tap lane');
+assert.strictEqual(api.roadTrackLaneForSide(0.67), 3, 'the right road lane must resolve to the fourth tap lane');
+assert.strictEqual(api.roadBandForSide(0), 0, 'the original road response must keep low frequencies near the center');
+assert.strictEqual(api.roadBandForSide(1), 7, 'the original road response must keep high frequencies near both edges');
+assert.strictEqual(api.spectrumHistorySlotForRow(api.constants.segmentCount, 27), 27, 'the latest spectrum sample must enter at the road horizon');
+assert.strictEqual(api.spectrumHistorySlotForRow(api.constants.segmentCount - 1, 27), 26, 'older spectrum samples must advance toward the camera');
+assert(
+  api.spectrumPulseForBand(0.82, 0.18, 6, 0, 0) > 0.95,
+  'a sudden high-frequency onset must create a visible road-wave crest'
+);
+assert(
+  api.spectrumPulseForBand(0.30, 0.30, 0, 0.9, 0.6) > api.spectrumPulseForBand(0.30, 0.30, 7, 0.9, 0.6),
+  'kick pulses must weight the center low-frequency lanes more strongly than the outer air band'
+);
+const isolatedOnset = api.rhythmTrackEventFrame(
+  [0.22, 0.24, 0.25, 0.28, 0.30, 0.31, 0.92, 0.24],
+  [0.22, 0.24, 0.25, 0.28, 0.30, 0.31, 0.12, 0.24],
+  [0, 0, 0, 0],
+  0.8,
+  0.9,
+  0,
+  -1
+);
+assert.strictEqual(isolatedOnset.eventLanes.length, 1, 'a normal beat must create one tap note rather than fill the row');
+assert.strictEqual(isolatedOnset.pulses.filter(value => value > 0.68).length, 1, 'one tap event must have exactly one bright note head');
+
+let chartEventIndex = 0;
+let chartLastLane = -1;
+const visitedTapLanes = new Set();
+for (let event = 0; event < 8; event += 1) {
+  const frame = api.rhythmTrackEventFrame(
+    [0.34, 0.32, 0.30, 0.28, 0.26, 0.24, 0.22, 0.20],
+    [0.34, 0.32, 0.30, 0.28, 0.26, 0.24, 0.22, 0.20],
+    [0, 0, 0, 0],
+    1,
+    1,
+    chartEventIndex,
+    chartLastLane
+  );
+  assert(frame.eventLanes.length >= 1 && frame.eventLanes.length <= api.constants.trackMaxEventLanes, 'an automatic chart event must contain one tap or a bounded two-note chord');
+  frame.eventLanes.forEach(lane => visitedTapLanes.add(lane));
+  chartEventIndex = frame.nextEventIndex;
+  chartLastLane = frame.lastLane;
+}
+assert.strictEqual(visitedTapLanes.size, 4, 'automatic tap notes must travel across all four highway lanes over time');
+
+const sustainedTrail = api.rhythmTrackEventFrame(
+  [0, 0, 0, 0, 0, 0.58, 0, 0],
+  [0, 0, 0, 0, 0, 0.58, 0, 0],
+  [0, 0, 0, 0.90],
+  0,
+  0,
+  4,
+  3
+);
+assert(sustainedTrail.pulses[3] > 0 && sustainedTrail.pulses[3] < 0.90, 'a sustained lane must leave a decaying hold-style track body behind its note head');
+assert.strictEqual(sustainedTrail.eventLanes.length, 0, 'a tail sample must not create another tap without a new beat');
+
+let cueAge = 0;
+let cueCooldown = 0;
+let previousCueBeat = 0;
+let previousCueTrigger = 0;
+let previousCueBands = [0, 0, 0, 0, 0, 0, 0, 0];
+const steadyCueTimes = [];
+for (let frame = 0; frame < 240; frame += 1) {
+  const cueAudio = {
+    bands: [0.42, 0.39, 0.36, 0.34, 0.31, 0.29, 0.26, 0.24],
+    energy: 0.55,
+    beat: 0.12,
+    trigger: 0.08,
+  };
+  const cue = api.rhythmChartCueFrame(
+    cueAudio,
+    previousCueBands,
+    previousCueBeat,
+    previousCueTrigger,
+    cueAge,
+    cueCooldown,
+    1 / 60,
+  );
+  cueAge = cue.cueAge;
+  cueCooldown = cue.cooldown;
+  previousCueBeat = cueAudio.beat;
+  previousCueTrigger = cueAudio.trigger;
+  previousCueBands = cueAudio.bands.slice();
+  if (cue.emitted) steadyCueTimes.push(frame / 60);
+}
+assert(steadyCueTimes.length >= 7, 'hard-mode fallback must keep generating taps through sustained music instead of stopping after the opening onset');
+assert(steadyCueTimes.at(-1) > 3, 'automatic taps must continue into the later part of the sampled song window');
+for (let index = 1; index < steadyCueTimes.length; index += 1) {
+  assert(steadyCueTimes[index] - steadyCueTimes[index - 1] >= api.constants.trackMinEventGap - 1 / 60, 'dense fallback taps must still respect the hard-mode minimum gap');
+}
 
 const seed = 314.159;
 const firstRun = [];
@@ -84,6 +188,11 @@ assert(maxCurveAcceleration < 1.2, 'road direction changes must not oscillate sh
 for (let zone = 0; zone < api.constants.biomeNames.length; zone += 1) {
   assert.strictEqual(api.biomeIndexAtDistance(zone * api.constants.biomeZoneLength, 0), zone, 'natural zones must progress deterministically');
 }
+const biomeTransitionDistance = api.constants.biomeZoneLength * (1 + api.constants.weatherTransitionStart + 0.12);
+const transitioningBiome = api.biomeStateAtDistance(biomeTransitionDistance, 0);
+assert.strictEqual(transitioningBiome.name, 'river', 'landscape transition must retain the current biome while crossfading');
+assert.strictEqual(transitioningBiome.nextName, 'hills', 'landscape transition must prepare the next roadside biome');
+assert(transitioningBiome.blend > 0 && transitioningBiome.blend < 1, 'roadside biomes must crossfade near the end of a zone');
 const weatherSamples = [
   { zone: 0, name: 'snow' },
   { zone: 1, name: 'rain' },
@@ -100,17 +209,53 @@ weatherSamples.forEach(sample => {
 const celestialNightZones = [5, 6, 11, 17, 18, 23, 29];
 const celestialTour = celestialNightZones.map(zone => api.celestialIndexForZone(zone, 0));
 assert.strictEqual(new Set(celestialTour).size, api.constants.celestialNames.length, 'seven night zones must cover every celestial body without random repeats');
+const celestialPositions = celestialNightZones.map(zone => api.celestialPositionForZone(zone, 0));
+assert.strictEqual(
+  new Set(celestialPositions.map(position => position.side)).size,
+  2,
+  'a deterministic night-sky tour must distribute celestial bodies across both sides'
+);
+celestialPositions.forEach(position => {
+  assert(Math.abs(position.x) >= 17.5 && Math.abs(position.x) <= 21, 'celestial horizontal placement must avoid the vanishing point and compact viewport edges');
+  assert(position.y >= 17 && position.y <= 20.5, 'celestial height must remain inside the visible upper sky');
+  assert(position.z >= -80 && position.z <= -74, 'celestial depth must preserve a recognizable but unobtrusive silhouette');
+});
+const repeatedCelestialPosition = api.celestialPositionForZone(11, 0);
+assert.deepStrictEqual(
+  [repeatedCelestialPosition.x, repeatedCelestialPosition.y, repeatedCelestialPosition.z, repeatedCelestialPosition.side],
+  [celestialPositions[2].x, celestialPositions[2].y, celestialPositions[2].z, celestialPositions[2].side],
+  'celestial placement must remain stable within the same night zone'
+);
+const celestialTilts = celestialNightZones.map((zone, index) => api.celestialAxialTiltForZone(zone, celestialTour[index], 0));
+celestialTilts.forEach(tilt => {
+  assert(tilt.angle >= 0.025 && tilt.angle <= 0.62, 'planet axial tilt must stay within a believable visible range');
+  assert(tilt.azimuth >= 0 && tilt.azimuth <= Math.PI * 2, 'planet spin-axis direction must cover a full deterministic rotation');
+  assert(Math.abs(Math.hypot(tilt.x, tilt.z) - tilt.angle) < 1e-9, 'planet axial tilt vector must preserve its requested angle');
+});
+assert(new Set(celestialTilts.map(tilt => tilt.azimuth.toFixed(3))).size >= 5, 'planet spin axes must not all lean in the same screen direction');
+const repeatedCelestialTilt = api.celestialAxialTiltForZone(11, celestialTour[2], 0);
+assert.deepStrictEqual(
+  [repeatedCelestialTilt.angle, repeatedCelestialTilt.azimuth, repeatedCelestialTilt.x, repeatedCelestialTilt.z, repeatedCelestialTilt.spinPhase],
+  [celestialTilts[2].angle, celestialTilts[2].azimuth, celestialTilts[2].x, celestialTilts[2].z, celestialTilts[2].spinPhase],
+  'planet axial tilt must remain stable throughout the same night zone'
+);
+assert.notStrictEqual(
+  api.celestialAxialTiltForZone(5, 3, 0).azimuth,
+  api.celestialAxialTiltForZone(35, 3, 0).azimuth,
+  'the same planet must receive a fresh spin-axis direction in a later night region'
+);
 assert.strictEqual(
   api.constants.celestialNames[api.celestialIndexForZone(5, 0)],
   'saturn',
   'the first deterministic starry-night QA zone must expose a recognizable ringed body'
 );
 const transitioningWeather = api.weatherStateAtDistance(
-  api.constants.biomeZoneLength * (1 + api.constants.weatherTransitionStart + 0.12),
+  biomeTransitionDistance,
   0,
 );
 const nextWeather = api.weatherStateAtDistance(api.constants.biomeZoneLength * 2, 0);
 assert(transitioningWeather.blend > 0 && transitioningWeather.blend < 1, 'weather must crossfade near the end of a biome');
+assert.strictEqual(transitioningBiome.blend, transitioningWeather.blend, 'roadside biome and sky transitions must share the same easing progress');
 assert.strictEqual(transitioningWeather.nextName, nextWeather.name, 'weather crossfades must meet the next zone continuously');
 for (let landmark = 0; landmark < api.constants.landmarkNames.length; landmark += 1) {
   assert.strictEqual(api.landmarkIndexAtDistance(landmark * api.constants.landmarkSpacing), landmark, 'roadside landmarks must progress deterministically');
@@ -182,6 +327,7 @@ assert(/MAX_VISUAL_PRESET_INDEX = 10/.test(core) && /HIGHWAY_PRESET_INDEX = 9/.t
 assert(presets.includes("name: '无尽公路'") && /presetDisplayOrder = \[0, 6, 7, 8, 9/.test(presets), 'highway card must be directly visible with the sonic presets');
 assert(/MineradioHighwayDrive\.onPresetChange/.test(presetGrid), 'preset changes must notify the highway runtime');
 assert(/MineradioHighwayDrive\.update/.test(mainLoop) && /visual\.highway-drive/.test(mainLoop), 'main loop must drive and measure the highway runtime');
+assert(/audio: sonicAudioFrame \|\|/.test(mainLoop), 'Highway Drive must receive the shared real-time spectrum frame instead of legacy aggregate energy only');
 assert(/!highwayPresetActiveEarly/.test(mainLoop), 'base cover particles must hide behind the highway scene');
 assert(/setVisualSuppressed\(highwayPresetActiveEarly \|\| niulaiPresetActiveEarly\)/.test(mainLoop) && /setVisualSuppressed: function/.test(shelfManager), 'highway mode must reveal the vanishing point without changing the persisted shelf mode');
 assert(/syncShelfSuppression\(active\)/.test(source), 'the highway runtime must keep the shelf hidden after later scene updates');
@@ -193,11 +339,18 @@ assert(/celestialSeries/.test(liveQa) && /celestial3D/.test(liveQa), 'live QA mu
 assert(/InstancedMesh/.test(source) && /highway-landscape-root/.test(source), 'natural scenery must use bounded instanced geometry beside the road');
 assert(/highway-landmark-root/.test(source) && /lateral = 9\.5/.test(source), 'landmarks must stay outside the road lanes');
 assert(/highway-dynamic-sky/.test(source) && /new THREE\.Points/.test(source), 'weather must use one procedural sky and one shared precipitation pool');
+assert(/syncBiomeTransition\(state\.travel \+ ROAD_LENGTH \* 0\.34\)/.test(source), 'roadside palette and water must use the same gradual zone transition as the sky');
+assert(/aBandPulse/.test(source) && /advanceSpectrumHistory\(state\.speed \* dt\)/.test(source), 'road-wave geometry must propagate detected spectrum onsets from the horizon toward the camera');
+assert(/aTrackPulse/.test(source) && /trackPulseHistory/.test(source), 'four-lane chart notes must use a separate history and shader attribute without replacing the original road rhythm');
+assert(/rhythmTrackEventFrame/.test(source) && /ROAD_TRACK_LANE_SEQUENCE/.test(source), 'road waves must generate an automatic rhythm-game chart instead of a full-width beat flash');
+assert(/trackCell=smoothstep\([^;]+laneDist\)/.test(source), 'tap blocks must fill the four visible highway lanes while respecting their actual separators');
+assert(/state\.spectrumDistance \/ ROAD_SPECTRUM_STEP/.test(source), 'road track events must interpolate between depth rows for continuous approach motion');
 assert(/new THREE\.SphereGeometry\(1, 48, 32\)/.test(source), 'night skies must render a true 3D sphere instead of a shader disc');
 assert(/new THREE\.RingGeometry\(1\.26, 2\.16, 96, 2\)/.test(source), 'Saturn must have independent 3D ring geometry');
 assert(/new THREE\.TextureLoader\(\)/.test(source) && /assets\/highway-planets\//.test(source), '3D planets must use packaged surface textures without runtime network access');
 assert(!/celestialBody\(vec2 uv,float body\)/.test(source), 'the old flat procedural celestial disc must stay removed');
-assert(/state\.celestialRoot\.position\.set\(0, 23, -76\)/.test(source), '3D planets must stay inside the camera-visible upper sky band');
+assert(/celestialPositionForZone\(displayZone, state\.seed\)/.test(source), '3D planet placement must update only when its deterministic night zone changes');
+assert(/applyCelestialAxialTilt\(displayZone, displayIndex\)/.test(source), '3D planets and Saturn rings must share a stable randomized axial tilt per night zone');
 let planetAssetBytes = 0;
 planetAssetNames.forEach(name => {
   const assetPath = path.join(planetAssetDir, name);

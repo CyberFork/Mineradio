@@ -196,6 +196,16 @@ async function main() {
   const transitionCheck = await evaluate(`(async () => {
     clearInterval(window.__mineradioHighwayQaTimer);
     window.__mineradioHighwayQaTimer = 0;
+    const waitForRenderTurn = () => new Promise(resolve => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        resolve();
+      };
+      setTimeout(finish, 180);
+      requestAnimationFrame(() => requestAnimationFrame(finish));
+    });
     const qaAudio = {
       sonicDetailed: true,
       subBass: 0.52,
@@ -217,6 +227,11 @@ async function main() {
       const item = MineradioHighwayDrive.snapshot();
       biomeSeries.push({ expected: name, actual: item.biome, sceneryInstances: item.sceneryInstances });
     });
+    const alignedTransitionJourney = MineradioHighwayDrive._test.constants.biomeZoneLength
+      * (1 + MineradioHighwayDrive._test.constants.weatherTransitionStart + 0.12);
+    MineradioHighwayDrive._test.setJourneyForQa(alignedTransitionJourney, 0);
+    MineradioHighwayDrive.update(1 / 60, { scene, camera, fx, audio: qaAudio });
+    const alignedTransition = MineradioHighwayDrive.snapshot();
     const weatherSeries = [
       { journey: 0, expected: 'snow' },
       { journey: 420, expected: 'rain' },
@@ -258,6 +273,11 @@ async function main() {
         celestial3D: item.celestial3D,
         celestialMeshCount: item.celestialMeshCount,
         celestialTexturesReady: item.celestialTexturesReady,
+        celestialSide: item.celestialSide,
+        celestialPosition: item.celestialPosition,
+        celestialAxialTilt: item.celestialAxialTilt,
+        celestialAxisAzimuth: item.celestialAxisAzimuth,
+        celestialAxis: item.celestialAxis,
       };
     });
     const landmarkSeries = [];
@@ -267,10 +287,10 @@ async function main() {
       landmarkSeries.push({ expected: name, actual: MineradioHighwayDrive.snapshot().visibleLandmark });
     });
     setPreset(4, { noSave: true, silent: true, preserveCamera: true });
-    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    await waitForRenderTurn();
     const basePresetRestored = fx.preset === 4 && particles && particles.visible;
     setPreset(9, { noSave: true, silent: true, preserveCamera: true });
-    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    await waitForRenderTurn();
     if (window.__mineradioHighwayQaHomeWasActive && typeof updateEmptyHomeVisibility === 'function') {
       homeSuppressed = false;
       homeForcedOpen = true;
@@ -284,6 +304,7 @@ async function main() {
       weatherSeries,
       celestialSeries,
       landmarkSeries,
+      alignedTransition,
     };
   })()`);
   socket.close();
@@ -292,6 +313,16 @@ async function main() {
     assert.strictEqual(capture.selectedPreset, 9, `${capture.name} did not select Highway Drive`);
     assert(capture.snapshot && capture.snapshot.active, `${capture.name} highway runtime stayed inactive`);
     assert(capture.snapshot.roadVertices > 1500, `${capture.name} road mesh was not initialized`);
+    assert.strictEqual(capture.snapshot.roadWaveVertices, capture.snapshot.roadVertices, `${capture.name} road-wave spectrum attribute does not cover the road mesh`);
+    assert.strictEqual(capture.snapshot.roadTrackVertices, capture.snapshot.roadVertices, `${capture.name} automatic chart attribute does not cover the road mesh`);
+    assert(capture.snapshot.spectrumHistorySamples > 8, `${capture.name} did not accumulate a moving spectrum history`);
+    assert(capture.snapshot.spectrumWavePeak > 0.05, `${capture.name} did not render a detected spectrum crest on the road`);
+    assert(capture.snapshot.trackNotePeak > 0.05, `${capture.name} did not render an independent four-lane tap note`);
+    assert(capture.snapshot.spectrumEventLanePeak > 0, `${capture.name} did not emit a rhythm-lane event`);
+    assert(capture.snapshot.spectrumEventLanePeak <= 2, `${capture.name} turned one beat into more than a two-note chord`);
+    assert(capture.snapshot.trackEventCount > 3, `${capture.name} automatic tap chart remained too sparse after the opening beat`);
+    assert(capture.snapshot.trackVisitedLanes > 1, `${capture.name} kept automatic tap notes in one highway lane`);
+    assert(capture.snapshot.spectrumTravelPhase >= 0 && capture.snapshot.spectrumTravelPhase <= 1, `${capture.name} road-wave interpolation phase left its bounded approach window`);
     assert.strictEqual(capture.snapshot.biome, capture.biome, `${capture.name} did not render the expected natural environment`);
     assert.strictEqual(capture.snapshot.weather, capture.weather, `${capture.name} did not render the expected sky weather`);
     if (capture.celestial) assert.strictEqual(capture.snapshot.celestial, capture.celestial, `${capture.name} did not render the expected celestial body`);
@@ -309,12 +340,23 @@ async function main() {
     assert.strictEqual(capture.splashCovered, false, `${capture.name} stayed trapped behind the startup render gate`);
     assert.strictEqual(capture.shelfParentVisible, false, `${capture.name} playlist shelf obscures the road vanishing point`);
   });
+  assert(
+    new Set(captures.map(capture => Math.round(capture.snapshot.spectrumTravelPhase * 10))).size > 1,
+    'rhythm-lane events did not move continuously between road depth rows'
+  );
+  assert(captures.some(capture => capture.snapshot.trackVisitedLanes === 4), 'automatic tap notes did not visit all four highway lanes');
   celestialCaptures.forEach(capture => {
     assert.strictEqual(capture.snapshot.celestial, capture.expected, `celestial screenshot did not activate ${capture.expected}`);
     assert.strictEqual(capture.snapshot.celestial3D, true, `celestial screenshot ${capture.expected} is not a 3D sphere`);
     assert.strictEqual(capture.snapshot.celestialMeshCount, 2, `celestial screenshot ${capture.expected} changed the bounded geometry pool`);
     assert.strictEqual(capture.snapshot.celestialTexturesReady, 8, `celestial screenshot ${capture.expected} is missing packaged textures`);
+    assert(['left', 'right'].includes(capture.snapshot.celestialSide), `celestial screenshot ${capture.expected} has no lateral placement`);
+    assert(Math.abs(capture.snapshot.celestialPosition.x) >= 17.5 && Math.abs(capture.snapshot.celestialPosition.x) <= 21, `celestial screenshot ${capture.expected} left the safe horizontal sky band`);
+    assert(capture.snapshot.celestialAxialTilt >= 0.025 && capture.snapshot.celestialAxialTilt <= 0.62, `celestial screenshot ${capture.expected} has an implausible axial tilt`);
+    assert(capture.snapshot.celestialAxis && Math.abs(Math.hypot(capture.snapshot.celestialAxis.x, capture.snapshot.celestialAxis.z) - capture.snapshot.celestialAxialTilt) < 1e-6, `celestial screenshot ${capture.expected} lost its shared spin axis`);
   });
+  assert.strictEqual(new Set(celestialCaptures.map(capture => capture.snapshot.celestialSide)).size, 2, 'celestial screenshots did not cover both sides of the highway');
+  assert(new Set(celestialCaptures.map(capture => capture.snapshot.celestialAxisAzimuth.toFixed(2))).size >= 5, 'celestial screenshots did not vary their spin-axis direction');
   assert.strictEqual(transitionCheck.basePresetRestored, true, 'leaving Highway Drive did not restore the base visual layers');
   assert.strictEqual(transitionCheck.splashActive, false, 'live QA left the startup render gate active');
   assert(transitionCheck.highway && transitionCheck.highway.active, 'live QA did not return to Highway Drive');
@@ -322,6 +364,8 @@ async function main() {
     assert.strictEqual(item.actual, item.expected, `natural environment ${item.expected} did not activate`);
     assert(item.sceneryInstances > 8, `natural environment ${item.expected} did not populate its scenery pool`);
   });
+  assert(transitionCheck.alignedTransition.biomeBlend > 0 && transitionCheck.alignedTransition.biomeBlend < 1, 'roadside biome transition did not crossfade');
+  assert.strictEqual(transitionCheck.alignedTransition.biomeBlend, transitionCheck.alignedTransition.weatherBlend, 'roadside biome transition drifted out of sync with the sky');
   transitionCheck.weatherSeries.forEach(item => {
     assert.strictEqual(item.actual, item.expected, `sky weather ${item.expected} did not activate`);
     assert(item.precipitationCount > 0 && item.precipitationCount <= 512, `sky weather ${item.expected} lost its bounded precipitation pool`);
@@ -334,7 +378,13 @@ async function main() {
     assert.strictEqual(item.celestial3D, true, `night journey ${item.expected} did not use SphereGeometry`);
     assert.strictEqual(item.celestialMeshCount, 2, `night journey ${item.expected} changed the bounded celestial geometry pool`);
     assert.strictEqual(item.celestialTexturesReady, 8, `night journey ${item.expected} did not load every packaged texture`);
+    assert(['left', 'right'].includes(item.celestialSide), `night journey ${item.expected} has no lateral placement`);
+    assert(item.celestialPosition && Math.abs(item.celestialPosition.x) >= 17.5 && Math.abs(item.celestialPosition.x) <= 21, `night journey ${item.expected} left the safe horizontal sky band`);
+    assert(item.celestialAxialTilt >= 0.025 && item.celestialAxialTilt <= 0.62, `night journey ${item.expected} has an implausible axial tilt`);
+    assert(item.celestialAxis && Math.abs(Math.hypot(item.celestialAxis.x, item.celestialAxis.z) - item.celestialAxialTilt) < 1e-6, `night journey ${item.expected} lost its shared spin axis`);
   });
+  assert.strictEqual(new Set(transitionCheck.celestialSeries.map(item => item.celestialSide)).size, 2, 'night journey did not distribute celestial bodies across both sides');
+  assert(new Set(transitionCheck.celestialSeries.map(item => item.celestialAxisAzimuth.toFixed(2))).size >= 5, 'night journey did not vary planet spin-axis directions');
   transitionCheck.landmarkSeries.forEach(item => {
     assert.strictEqual(item.actual, item.expected, `roadside landmark ${item.expected} did not activate`);
   });

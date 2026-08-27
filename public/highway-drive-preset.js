@@ -11,6 +11,15 @@
   var ROAD_BAND_COUNT = 8;
   var ROAD_NEAR = 1.4;
   var ROAD_LENGTH = 98;
+  var ROAD_SPECTRUM_SAMPLE_COUNT = ROAD_SEGMENT_COUNT + 1;
+  var ROAD_SPECTRUM_STEP = ROAD_LENGTH / ROAD_SEGMENT_COUNT;
+  var ROAD_TRACK_LANE_BANDS = [[0, 4], [2, 6], [3, 7], [1, 5]];
+  var ROAD_TRACK_LANE_CENTERS = [-0.67, -0.17, 0.17, 0.67];
+  var ROAD_TRACK_LANE_SEQUENCE = [1, 2, 0, 3, 2, 0, 3, 1];
+  var ROAD_TRACK_LANE_COUNT = ROAD_TRACK_LANE_BANDS.length;
+  var ROAD_TRACK_MAX_EVENT_LANES = 2;
+  var ROAD_TRACK_MIN_EVENT_GAP = 0.12;
+  var ROAD_TRACK_ONSET_THRESHOLD = 0.15;
   var ROAD_HALF_WIDTH = 3.7;
   var SHOULDER_HALF_WIDTH = 26;
   var ROAD_BASE_Y = -1.62;
@@ -104,6 +113,25 @@
     landmarkMaterials: null,
     roadPositions: null,
     roadEnergy: null,
+    roadPulse: null,
+    roadTrackPulse: null,
+    spectrumEnergyHistory: null,
+    spectrumPulseHistory: null,
+    trackPulseHistory: null,
+    spectrumHead: -1,
+    spectrumSamples: 0,
+    spectrumDistance: 0,
+    spectrumWavePeak: 0,
+    trackNotePeak: 0,
+    spectrumEventLanePeak: 0,
+    pendingTrigger: 0,
+    trackEventIndex: 0,
+    lastTrackLane: -1,
+    trackVisitedMask: 0,
+    trackCueAge: 0,
+    trackCueCooldown: 0,
+    trackPreviousBeat: 0,
+    trackPreviousBands: [0, 0, 0, 0, 0, 0, 0, 0],
     shoulderPositions: null,
     leftRailPositions: null,
     rightRailPositions: null,
@@ -112,14 +140,23 @@
     rollAxis: null,
     roll: 0,
     biomeIndex: -1,
+    nextBiomeIndex: -1,
+    biomeBlend: 0,
     biomeFade: 0,
+    leftWaterAmount: 0,
+    rightWaterAmount: 0,
     weatherIndex: 0,
     nextWeatherIndex: 0,
     weatherBlend: 0,
     celestialIndex: 0,
     nextCelestialIndex: 0,
     activeCelestialIndex: -1,
+    activeCelestialZone: -1,
     celestialOpacity: 0,
+    celestialAxialTilt: 0,
+    celestialAxisAzimuth: 0,
+    celestialAxisX: 0,
+    celestialAxisZ: 0,
     rainAmount: 0,
     snowAmount: 0,
     visibleLandmark: '',
@@ -191,6 +228,22 @@
     return positiveModulo(zone + offset, BIOME_NAMES.length);
   }
 
+  function biomeStateAtDistance(distance, seed) {
+    var safeDistance = Math.max(0, Number(distance) || 0);
+    var currentIndex = biomeIndexAtDistance(safeDistance, seed);
+    var nextIndex = biomeIndexAtDistance(safeDistance + BIOME_ZONE_LENGTH, seed);
+    var progress = positiveModulo(safeDistance, BIOME_ZONE_LENGTH) / BIOME_ZONE_LENGTH;
+    return {
+      index: currentIndex,
+      name: BIOME_NAMES[currentIndex],
+      nextIndex: nextIndex,
+      nextName: BIOME_NAMES[nextIndex],
+      blend: smoothstep((progress - WEATHER_TRANSITION_START) / (1 - WEATHER_TRANSITION_START)),
+      progress: progress,
+      zone: Math.floor(safeDistance / BIOME_ZONE_LENGTH)
+    };
+  }
+
   function weatherIndexForSequence(sequenceIndex) {
     var biomeIndex = positiveModulo(sequenceIndex, BIOME_NAMES.length);
     var tourIndex = positiveModulo(Math.floor(sequenceIndex / BIOME_NAMES.length), WEATHER_BY_BIOME_TOUR.length);
@@ -206,6 +259,35 @@
       if (weatherIndexForSequence(index + weatherOffset) >= 4) nightOrdinal += 1;
     }
     return positiveModulo(3 + nightOrdinal * 2 + celestialOffset, CELESTIAL_NAMES.length);
+  }
+
+  function celestialPositionForZone(zone, seed) {
+    var safeZone = Math.max(0, Math.floor(Number(zone) || 0));
+    var safeSeed = Number(seed) || 0;
+    var side = hash1(safeZone + 17, safeSeed + 503) >= 0 ? 1 : -1;
+    var horizontal = 17.5 + (hash1(safeZone + 31, safeSeed + 587) + 1) * 1.75;
+    var height = 17 + (hash1(safeZone + 47, safeSeed + 643) + 1) * 1.75;
+    var depth = -74 - (hash1(safeZone + 59, safeSeed + 701) + 1) * 3;
+    return { x: side * horizontal, y: height, z: depth, side: side < 0 ? 'left' : 'right' };
+  }
+
+  function celestialAxialTiltForZone(zone, index, seed) {
+    var safeZone = Math.max(0, Math.floor(Number(zone) || 0));
+    var safeIndex = Math.max(0, Math.min(CELESTIAL_CONFIG.length - 1, Math.round(Number(index) || 0)));
+    var safeSeed = Number(seed) || 0;
+    var baseTilt = CELESTIAL_CONFIG[safeIndex].tilt;
+    var tiltVariation = (hash1(safeZone + 83, safeSeed + safeIndex * 137 + 761) + 1) * 0.5;
+    var fineVariation = (hash1(safeZone + 109, safeSeed + safeIndex * 191 + 823) + 1) * 0.5;
+    var angle = clamp(baseTilt * (0.78 + tiltVariation * 0.44) + fineVariation * 0.036, 0.025, 0.62);
+    var azimuth = (hash1(safeZone + 131, safeSeed + safeIndex * 223 + 887) + 1) * Math.PI;
+    var spinPhase = (hash1(safeZone + 157, safeSeed + safeIndex * 257 + 947) + 1) * Math.PI;
+    return {
+      angle: angle,
+      azimuth: azimuth,
+      x: Math.sin(azimuth) * angle,
+      z: Math.cos(azimuth) * angle,
+      spinPhase: spinPhase
+    };
   }
 
   function weatherStateAtDistance(distance, seed) {
@@ -313,6 +395,8 @@
     var positions = new Float32Array(vertexCount * 3);
     var uv = new Float32Array(vertexCount * 2);
     var energy = new Float32Array(vertexCount);
+    var pulse = new Float32Array(vertexCount);
+    var trackPulse = new Float32Array(vertexCount);
     var indices = [];
     for (var row = 0; row < rows; row++) {
       for (var column = 0; column < ROAD_COLUMN_COUNT; column++) {
@@ -329,10 +413,15 @@
     geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
     geometry.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
     geometry.setAttribute('aBandEnergy', new THREE.BufferAttribute(energy, 1));
+    geometry.setAttribute('aBandPulse', new THREE.BufferAttribute(pulse, 1));
+    geometry.setAttribute('aTrackPulse', new THREE.BufferAttribute(trackPulse, 1));
     geometry.setIndex(indices);
     geometry.computeBoundingSphere();
     state.roadPositions = positions;
     state.roadEnergy = energy;
+    state.roadPulse = pulse;
+    state.roadTrackPulse = trackPulse;
+    resetSpectrumHistory();
     return geometry;
   }
 
@@ -340,12 +429,18 @@
     return [
       'precision highp float;',
       'attribute float aBandEnergy;',
+      'attribute float aBandPulse;',
+      'attribute float aTrackPulse;',
       'varying vec2 vUv;',
       'varying float vBandEnergy;',
+      'varying float vBandPulse;',
+      'varying float vTrackPulse;',
       'varying float vDepth;',
       'void main(){',
       '  vUv=uv;',
       '  vBandEnergy=aBandEnergy;',
+      '  vBandPulse=aBandPulse;',
+      '  vTrackPulse=aTrackPulse;',
       '  vDepth=max(0.0,-position.z);',
       '  gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);',
       '}'
@@ -365,6 +460,8 @@
       'uniform vec3 uAccent;',
       'varying vec2 vUv;',
       'varying float vBandEnergy;',
+      'varying float vBandPulse;',
+      'varying float vTrackPulse;',
       'varying float vDepth;',
       'void main(){',
       '  float side=abs(vUv.x*2.0-1.0);',
@@ -374,15 +471,18 @@
       '  float lane=(1.0-smoothstep(0.010,0.030,laneDist))*dash;',
       '  float edge=1.0-smoothstep(0.010,0.040,abs(side-0.955));',
       '  float crossGrid=1.0-smoothstep(0.025,0.105,abs(fract((vDepth+uTravel)*0.185)-0.5));',
-      '  float pulse=1.0-smoothstep(0.018,0.078,abs(fract((vDepth-uTravel*0.42)*0.038)-0.12));',
+      '  float trackCell=smoothstep(0.022,0.080,laneDist);',
       '  vec3 bandColor=mix(uPrimary,uSecondary,smoothstep(0.08,0.92,side));',
       '  vec3 asphalt=mix(vec3(0.010,0.015,0.026),bandColor,0.048+vBandEnergy*0.090);',
       '  float spectrum=(0.14+vBandEnergy*0.92)*(0.28+crossGrid*0.72);',
+      '  float waveGlow=pow(max(vBandPulse,0.0),1.16)*(0.30+crossGrid*0.70);',
+      '  float trackGlow=pow(max(vTrackPulse,0.0),1.08)*trackCell;',
       '  vec3 color=asphalt+bandColor*spectrum*0.48;',
-      '  color+=uAccent*lane*(0.82+uBoost*0.58);',
+      '  color+=uAccent*lane*(0.82+uBoost*0.58+uBeat*0.12);',
       '  color+=mix(uPrimary,uSecondary,step(0.5,vUv.x))*edge*(0.96+vBandEnergy*0.72);',
-      '  color+=uAccent*pulse*(uBeat*0.72+uBoost*0.88)*(1.0-side*0.38);',
       '  color+=bandColor*pow(max(vBandEnergy,0.0),1.22)*0.62;',
+      '  color+=mix(bandColor,uAccent,0.30)*waveGlow*0.82;',
+      '  color+=mix(bandColor,uAccent,0.72)*trackGlow*1.46;',
       '  float alpha=uOpacity*fog*(0.94+min(0.05,spectrum*0.03));',
       '  gl_FragColor=vec4(color,alpha);',
       '}'
@@ -635,15 +735,26 @@
     state.celestialMesh.scale.set(config.radius, config.radius * config.flatten, config.radius);
     state.celestialRing.scale.setScalar(config.radius);
     state.celestialMesh.rotation.y = index * 0.71;
-    state.celestialRoot.rotation.z = config.tilt * 0.34;
     state.celestialRing.visible = !!config.ring;
+  }
+
+  function applyCelestialAxialTilt(zone, index) {
+    if (!state.celestialRoot || !state.celestialMesh) return;
+    var orientation = celestialAxialTiltForZone(zone, index, state.seed);
+    state.celestialRoot.rotation.set(orientation.x, 0, orientation.z);
+    state.celestialMesh.rotation.y = orientation.spinPhase;
+    state.celestialAxialTilt = orientation.angle;
+    state.celestialAxisAzimuth = orientation.azimuth;
+    state.celestialAxisX = orientation.x;
+    state.celestialAxisZ = orientation.z;
   }
 
   function createCelestialLayer() {
     var textures = loadCelestialTextures();
     state.celestialRoot = new THREE.Group();
     state.celestialRoot.name = 'highway-celestial-3d-root';
-    state.celestialRoot.position.set(0, 23, -76);
+    var initialPosition = celestialPositionForZone(0, state.seed);
+    state.celestialRoot.position.set(initialPosition.x, initialPosition.y, initialPosition.z);
 
     state.celestialMaterial = new THREE.MeshPhongMaterial({
       map: textures.surfaces[0],
@@ -696,23 +807,35 @@
     var currentNight = weather.index >= 4;
     var nextNight = weather.nextIndex >= 4;
     var displayIndex = -1;
+    var displayZone = -1;
     var celestialOpacity = 0;
     if (currentNight && nextNight) {
       if (weather.blend < 0.5) {
         displayIndex = state.celestialIndex;
+        displayZone = weather.zone;
         celestialOpacity = 1 - smoothstep(weather.blend / 0.5);
       } else {
         displayIndex = state.nextCelestialIndex;
+        displayZone = weather.zone + 1;
         celestialOpacity = smoothstep((weather.blend - 0.5) / 0.5);
       }
     } else if (currentNight) {
       displayIndex = state.celestialIndex;
+      displayZone = weather.zone;
       celestialOpacity = 1 - weather.blend;
     } else if (nextNight) {
       displayIndex = state.nextCelestialIndex;
+      displayZone = weather.zone + 1;
       celestialOpacity = weather.blend;
     }
-    if (displayIndex >= 0 && displayIndex !== state.activeCelestialIndex) applyCelestialAppearance(displayIndex);
+    var appearanceChanged = displayIndex >= 0 && displayIndex !== state.activeCelestialIndex;
+    if (appearanceChanged) applyCelestialAppearance(displayIndex);
+    if (displayZone >= 0 && (displayZone !== state.activeCelestialZone || appearanceChanged)) {
+      var position = celestialPositionForZone(displayZone, state.seed);
+      state.celestialRoot.position.set(position.x, position.y, position.z);
+      applyCelestialAxialTilt(displayZone, displayIndex);
+      state.activeCelestialZone = displayZone;
+    }
     state.celestialOpacity = clamp01(celestialOpacity);
     state.celestialRoot.visible = state.celestialOpacity > 0.01;
     if (displayIndex >= 0) {
@@ -837,7 +960,8 @@
       trunk: makeWorldMaterial(0x26362f, true),
       crown: makeWorldMaterial(0x315b49, true),
       cactus: makeWorldMaterial(0x39704d, true),
-      water: makeWorldMaterial(0x1688a5, false)
+      waterLeft: makeWorldMaterial(0x1688a5, false),
+      waterRight: makeWorldMaterial(0x1688a5, false)
     };
     state.mountainMesh = createInstancedWorldMesh(
       new THREE.ConeGeometry(1, 1, 6),
@@ -877,8 +1001,8 @@
     );
 
     var waterGeometry = new THREE.PlaneGeometry(1, 1, 1, 1);
-    state.leftWater = new THREE.Mesh(waterGeometry, state.sceneryMaterials.water);
-    state.rightWater = new THREE.Mesh(waterGeometry, state.sceneryMaterials.water);
+    state.leftWater = new THREE.Mesh(waterGeometry, state.sceneryMaterials.waterLeft);
+    state.rightWater = new THREE.Mesh(waterGeometry, state.sceneryMaterials.waterRight);
     state.leftWater.name = 'highway-water-left';
     state.rightWater.name = 'highway-water-right';
     state.leftWater.rotation.x = -Math.PI / 2;
@@ -1051,12 +1175,271 @@
   }
 
   function roadBandForSide(side) {
-    return Math.min(ROAD_BAND_COUNT - 1, Math.floor(Math.abs(side) * ROAD_BAND_COUNT));
+    return Math.min(ROAD_BAND_COUNT - 1, Math.floor(Math.abs(clamp(Number(side) || 0, -1, 1)) * ROAD_BAND_COUNT));
   }
 
-  function updateRoadGeometry(audio) {
-    var step = ROAD_LENGTH / ROAD_SEGMENT_COUNT;
+  function roadTrackLaneForSide(side) {
+    var safeSide = clamp(Number(side) || 0, -1, 1);
+    var nearestLane = 0;
+    var nearestDistance = Infinity;
+    for (var lane = 0; lane < ROAD_TRACK_LANE_COUNT; lane++) {
+      var distance = Math.abs(safeSide - roadTrackLaneCenter(lane));
+      if (distance < nearestDistance) {
+        nearestDistance = distance;
+        nearestLane = lane;
+      }
+    }
+    return nearestLane;
+  }
+
+  function roadTrackLaneCenter(lane) {
+    var safeLane = Math.max(0, Math.min(ROAD_TRACK_LANE_COUNT - 1, Math.round(Number(lane) || 0)));
+    return ROAD_TRACK_LANE_CENTERS[safeLane];
+  }
+
+  function roadTrackLaneForBand(band) {
+    var safeBand = Math.max(0, Math.min(ROAD_BAND_COUNT - 1, Math.round(Number(band) || 0)));
+    for (var lane = 0; lane < ROAD_TRACK_LANE_COUNT; lane++) {
+      if (ROAD_TRACK_LANE_BANDS[lane].indexOf(safeBand) >= 0) return lane;
+    }
+    return 0;
+  }
+
+  function spectrumHistorySlotForRow(row, head) {
+    var safeRow = Math.max(0, Math.min(ROAD_SEGMENT_COUNT, Math.round(Number(row) || 0)));
+    var safeHead = Math.round(Number(head) || 0);
+    return positiveModulo(safeHead - (ROAD_SEGMENT_COUNT - safeRow), ROAD_SPECTRUM_SAMPLE_COUNT);
+  }
+
+  function spectrumPulseForBand(current, previous, band, beat, boost) {
+    var safeBand = Math.max(0, Math.min(ROAD_BAND_COUNT - 1, Math.round(Number(band) || 0)));
+    var lowWeight = 1 - safeBand / (ROAD_BAND_COUNT - 1);
+    var onset = Math.max(0, clamp01(current) - clamp01(previous));
+    var beatDrive = clamp01(beat) * (0.16 + lowWeight * 0.58);
+    var boostDrive = clamp01(boost) * (0.08 + lowWeight * 0.34);
+    return clamp01(onset * 3.2 + beatDrive + boostDrive);
+  }
+
+  function rhythmChartCueFrame(audio, previousBands, previousBeat, previousTrigger, cueAge, cooldown, dt) {
+    audio = audio || {};
+    var currentBands = audio.bands || [];
+    var elapsed = clamp(Number(dt) || 0, 0, 0.1);
+    var nextAge = Math.max(0, Number(cueAge) || 0) + elapsed;
+    var nextCooldown = Math.max(0, (Number(cooldown) || 0) - elapsed);
+    var onsetPeak = 0;
+    var onsetTotal = 0;
+    var bandTotal = 0;
+    for (var band = 0; band < ROAD_BAND_COUNT; band++) {
+      var current = clamp01(currentBands[band]);
+      var previous = clamp01(previousBands && previousBands[band]);
+      var onset = Math.max(0, current - previous);
+      onsetPeak = Math.max(onsetPeak, onset);
+      onsetTotal += onset;
+      bandTotal += current;
+    }
+    var onsetStrength = clamp01(onsetPeak * 2.2 + onsetTotal / ROAD_BAND_COUNT * 1.6);
+    var beat = clamp01(audio.beat);
+    var trigger = clamp01(audio.trigger);
+    var beatRise = Math.max(0, beat - clamp01(previousBeat));
+    var triggerCandidate = trigger > ROAD_TRACK_ONSET_THRESHOLD && clamp01(previousTrigger) <= ROAD_TRACK_ONSET_THRESHOLD;
+    var beatCandidate = beat > 0.18 && beatRise > 0.035;
+    var onsetCandidate = onsetStrength >= ROAD_TRACK_ONSET_THRESHOLD;
+    var activeEnergy = Math.max(clamp01(audio.energy), bandTotal / ROAD_BAND_COUNT);
+    var fillGap = clamp(0.58 - activeEnergy * 0.20 - beat * 0.06, 0.34, 0.58);
+    var fillCandidate = activeEnergy > 0.10 && nextAge >= fillGap;
+    var emitted = nextCooldown <= 0 && (triggerCandidate || beatCandidate || onsetCandidate || fillCandidate);
+    var strength = 0;
+    if (emitted) {
+      strength = Math.max(
+        triggerCandidate ? trigger : 0,
+        beatCandidate ? beat : 0,
+        onsetCandidate ? onsetStrength : 0,
+        fillCandidate ? 0.42 + activeEnergy * 0.30 : 0
+      );
+      strength = Math.max(0.34, clamp01(strength));
+      nextAge = 0;
+      nextCooldown = ROAD_TRACK_MIN_EVENT_GAP;
+    }
+    return {
+      emitted: emitted,
+      strength: strength,
+      onsetStrength: onsetStrength,
+      fillCandidate: fillCandidate,
+      cueAge: nextAge,
+      cooldown: nextCooldown
+    };
+  }
+
+  function rhythmTrackEventFrame(currentBands, previousBands, previousTrackPulses, beat, trigger, eventIndex, lastLane) {
+    var candidates = new Array(ROAD_BAND_COUNT);
+    var eventStrength = clamp01(trigger);
+    var eventBeat = clamp01(beat) * eventStrength;
+    for (var band = 0; band < ROAD_BAND_COUNT; band++) {
+      var current = clamp01(currentBands && currentBands[band]);
+      var previous = clamp01(previousBands && previousBands[band]);
+      candidates[band] = spectrumPulseForBand(current, previous, band, eventBeat, eventStrength);
+    }
+    var rankedBands = candidates.map(function (value, band) {
+      return { band: band, value: value };
+    }).sort(function (a, b) {
+      return b.value - a.value || a.band - b.band;
+    });
+    var pulses = new Array(ROAD_TRACK_LANE_COUNT);
+    for (var lane = 0; lane < ROAD_TRACK_LANE_COUNT; lane++) {
+      var laneBands = ROAD_TRACK_LANE_BANDS[lane];
+      var laneEnergy = Math.max(
+        clamp01(currentBands && currentBands[laneBands[0]]),
+        clamp01(currentBands && currentBands[laneBands[1]])
+      );
+      pulses[lane] = clamp01(previousTrackPulses && previousTrackPulses[lane]) * (laneEnergy > 0.18 ? 0.62 : 0.36);
+    }
+    var safeEventIndex = Math.max(0, Math.floor(Number(eventIndex) || 0));
+    var safeLastLane = Number(lastLane);
+    var eventLanes = [];
+    if (eventStrength > 0.28 && rankedBands.length) {
+      var dominantLane = roadTrackLaneForBand(rankedBands[0].band);
+      var sequenceLane = ROAD_TRACK_LANE_SEQUENCE[safeEventIndex % ROAD_TRACK_LANE_SEQUENCE.length];
+      var primaryLane = positiveModulo(sequenceLane + dominantLane, ROAD_TRACK_LANE_COUNT);
+      if (primaryLane === safeLastLane) {
+        primaryLane = positiveModulo(primaryLane + (safeEventIndex % 2 === 0 ? 1 : -1), ROAD_TRACK_LANE_COUNT);
+      }
+      pulses[primaryLane] = Math.max(pulses[primaryLane], 0.68 + eventStrength * 0.32);
+      eventLanes.push(primaryLane);
+      if (eventStrength > 0.86 && safeEventIndex % 6 === 5) {
+        var secondaryLane = positiveModulo(primaryLane + 2, ROAD_TRACK_LANE_COUNT);
+        pulses[secondaryLane] = Math.max(pulses[secondaryLane], 0.52 + eventStrength * 0.28);
+        eventLanes.push(secondaryLane);
+      }
+      safeEventIndex++;
+      safeLastLane = primaryLane;
+    }
+    return {
+      pulses: pulses,
+      eventLanes: eventLanes,
+      nextEventIndex: safeEventIndex,
+      lastLane: isFinite(safeLastLane) ? safeLastLane : -1
+    };
+  }
+
+  function resetSpectrumHistory() {
+    state.spectrumEnergyHistory = new Float32Array(ROAD_SPECTRUM_SAMPLE_COUNT * ROAD_BAND_COUNT);
+    state.spectrumPulseHistory = new Float32Array(ROAD_SPECTRUM_SAMPLE_COUNT * ROAD_BAND_COUNT);
+    state.trackPulseHistory = new Float32Array(ROAD_SPECTRUM_SAMPLE_COUNT * ROAD_TRACK_LANE_COUNT);
+    state.spectrumHead = -1;
+    state.spectrumSamples = 0;
+    state.spectrumDistance = 0;
+    state.spectrumWavePeak = 0;
+    state.trackNotePeak = 0;
+    state.spectrumEventLanePeak = 0;
+    state.pendingTrigger = 0;
+    state.trackEventIndex = 0;
+    state.lastTrackLane = -1;
+    state.trackVisitedMask = 0;
+    state.trackCueAge = 0;
+    state.trackCueCooldown = 0;
+    state.trackPreviousBeat = 0;
+    state.trackPreviousBands = [0, 0, 0, 0, 0, 0, 0, 0];
+  }
+
+  function pushSpectrumHistorySample() {
+    if (!state.spectrumEnergyHistory || !state.spectrumPulseHistory || !state.trackPulseHistory) resetSpectrumHistory();
+    var previousHead = state.spectrumHead;
+    var nextHead = positiveModulo(previousHead + 1, ROAD_SPECTRUM_SAMPLE_COUNT);
+    var nextEnergyOffset = nextHead * ROAD_BAND_COUNT;
+    var previousEnergyOffset = previousHead >= 0 ? previousHead * ROAD_BAND_COUNT : -1;
+    var nextPulseOffset = nextHead * ROAD_BAND_COUNT;
+    var previousPulseOffset = previousHead >= 0 ? previousHead * ROAD_BAND_COUNT : -1;
+    var nextTrackOffset = nextHead * ROAD_TRACK_LANE_COUNT;
+    var previousTrackOffset = previousHead >= 0 ? previousHead * ROAD_TRACK_LANE_COUNT : -1;
+    var currentBands = new Array(ROAD_BAND_COUNT);
+    var previousBands = new Array(ROAD_BAND_COUNT);
+    for (var band = 0; band < ROAD_BAND_COUNT; band++) {
+      var energy = clamp01(state.bands[band]);
+      var previous = previousEnergyOffset >= 0 ? state.spectrumEnergyHistory[previousEnergyOffset + band] : 0;
+      currentBands[band] = energy;
+      previousBands[band] = previous;
+      state.spectrumEnergyHistory[nextEnergyOffset + band] = energy;
+      var previousPulse = previousPulseOffset >= 0 ? state.spectrumPulseHistory[previousPulseOffset + band] : 0;
+      var detectedPulse = spectrumPulseForBand(energy, previous, band, state.beat, Math.max(state.boost * 0.42, state.pendingTrigger * 0.68));
+      state.spectrumPulseHistory[nextPulseOffset + band] = Math.max(detectedPulse, previousPulse * 0.58);
+    }
+    var previousTrackPulses = new Array(ROAD_TRACK_LANE_COUNT);
+    for (var lane = 0; lane < ROAD_TRACK_LANE_COUNT; lane++) {
+      previousTrackPulses[lane] = previousTrackOffset >= 0 ? state.trackPulseHistory[previousTrackOffset + lane] : 0;
+    }
+    var trackFrame = rhythmTrackEventFrame(
+      currentBands,
+      previousBands,
+      previousTrackPulses,
+      state.beat,
+      state.pendingTrigger,
+      state.trackEventIndex,
+      state.lastTrackLane
+    );
+    for (var pulseLane = 0; pulseLane < ROAD_TRACK_LANE_COUNT; pulseLane++) {
+      state.trackPulseHistory[nextTrackOffset + pulseLane] = trackFrame.pulses[pulseLane];
+    }
+    state.trackEventIndex = trackFrame.nextEventIndex;
+    state.lastTrackLane = trackFrame.lastLane;
+    state.spectrumEventLanePeak = Math.max(state.spectrumEventLanePeak, trackFrame.eventLanes.length);
+    for (var eventLaneIndex = 0; eventLaneIndex < trackFrame.eventLanes.length; eventLaneIndex++) {
+      state.trackVisitedMask |= 1 << trackFrame.eventLanes[eventLaneIndex];
+    }
+    state.pendingTrigger = 0;
+    state.spectrumHead = nextHead;
+    state.spectrumSamples = Math.min(ROAD_SPECTRUM_SAMPLE_COUNT, state.spectrumSamples + 1);
+  }
+
+  function advanceSpectrumHistory(distance) {
+    if (!state.spectrumEnergyHistory || !state.spectrumPulseHistory || !state.trackPulseHistory) resetSpectrumHistory();
+    if (state.spectrumSamples === 0) pushSpectrumHistorySample();
+    state.spectrumDistance += Math.max(0, Number(distance) || 0);
+    var steps = Math.min(ROAD_SPECTRUM_SAMPLE_COUNT, Math.floor(state.spectrumDistance / ROAD_SPECTRUM_STEP));
+    for (var index = 0; index < steps; index++) pushSpectrumHistorySample();
+    state.spectrumDistance -= steps * ROAD_SPECTRUM_STEP;
+  }
+
+  function historyValueAtRow(row, channel, history, stride) {
+    if (state.spectrumHead < 0) return 0;
+    var slot = spectrumHistorySlotForRow(row, state.spectrumHead);
+    var safeChannel = Math.max(0, Math.min(stride - 1, Math.round(Number(channel) || 0)));
+    var offset = slot * stride + safeChannel;
+    if (!history) return 0;
+    var current = history[offset] || 0;
+    if (row >= ROAD_SEGMENT_COUNT) return current;
+    var nextSlot = spectrumHistorySlotForRow(row + 1, state.spectrumHead);
+    var next = history[nextSlot * stride + safeChannel] || 0;
+    var phase = clamp01(state.spectrumDistance / ROAD_SPECTRUM_STEP);
+    return current + (next - current) * phase;
+  }
+
+  function spectrumValueAtRow(row, band) {
+    return historyValueAtRow(row, band, state.spectrumEnergyHistory, ROAD_BAND_COUNT);
+  }
+
+  function spectrumPulseValueAtRow(row, band) {
+    return historyValueAtRow(row, band, state.spectrumPulseHistory, ROAD_BAND_COUNT);
+  }
+
+  function trackPulseValueAtRow(row, lane) {
+    return historyValueAtRow(row, lane, state.trackPulseHistory, ROAD_TRACK_LANE_COUNT);
+  }
+
+  function spectrumTrackLaneValueAtRow(row, lane, pulse) {
+    var safeLane = Math.max(0, Math.min(ROAD_TRACK_LANE_COUNT - 1, Math.round(Number(lane) || 0)));
+    if (pulse) return trackPulseValueAtRow(row, safeLane);
+    var laneBands = ROAD_TRACK_LANE_BANDS[safeLane];
+    return Math.max(
+      spectrumValueAtRow(row, laneBands[0]),
+      spectrumValueAtRow(row, laneBands[1])
+    );
+  }
+
+  function updateRoadGeometry() {
+    var step = ROAD_SPECTRUM_STEP;
     var rowSamples = new Array(ROAD_SEGMENT_COUNT + 1);
+    state.spectrumWavePeak = 0;
+    state.trackNotePeak = 0;
     for (var row = 0; row <= ROAD_SEGMENT_COUNT; row++) {
       var ahead = ROAD_NEAR + row * step;
       rowSamples[row] = localRoadSample(ahead);
@@ -1064,16 +1447,28 @@
       for (var column = 0; column < ROAD_COLUMN_COUNT; column++) {
         var vertex = row * ROAD_COLUMN_COUNT + column;
         var side = -1 + column * 2 / (ROAD_COLUMN_COUNT - 1);
+        var trackLane = roadTrackLaneForSide(side);
         var band = roadBandForSide(side);
-        var bandEnergy = state.bands[band];
+        var bandEnergy = spectrumValueAtRow(row, band);
+        var bandPulse = spectrumPulseValueAtRow(row, band);
+        var trackPulse = trackPulseValueAtRow(row, trackLane);
+        var sideAmount = Math.abs(side);
         var ripple = Math.sin((state.travel + ahead) * (0.46 + band * 0.018) - state.time * (2.2 + band * 0.08) + band * 0.86);
         var beatRidge = Math.sin((state.travel + ahead) * 0.74 - state.time * 4.4);
-        var lift = (bandEnergy * (0.052 + Math.abs(side) * 0.118) * ripple + state.beat * 0.040 * beatRidge) * distanceFade;
+        var energyLift = bandEnergy * (0.036 + sideAmount * 0.075) * ripple;
+        var beatLift = state.beat * 0.026 * beatRidge;
+        var pulseLift = bandPulse * (0.020 + sideAmount * 0.042);
+        var trackLift = trackPulse * (0.040 + sideAmount * 0.032);
+        var lift = (energyLift + beatLift + pulseLift + trackLift) * distanceFade;
         var offset = vertex * 3;
         state.roadPositions[offset] = rowSamples[row].x + side * ROAD_HALF_WIDTH;
         state.roadPositions[offset + 1] = ROAD_BASE_Y + rowSamples[row].y + lift;
         state.roadPositions[offset + 2] = -ahead;
         state.roadEnergy[vertex] = bandEnergy;
+        state.roadPulse[vertex] = bandPulse;
+        state.roadTrackPulse[vertex] = trackPulse;
+        state.spectrumWavePeak = Math.max(state.spectrumWavePeak, bandPulse);
+        state.trackNotePeak = Math.max(state.trackNotePeak, trackPulse);
       }
       var shoulderOffset = row * 6;
       state.shoulderPositions[shoulderOffset] = rowSamples[row].x - SHOULDER_HALF_WIDTH;
@@ -1085,6 +1480,8 @@
     }
     state.road.geometry.attributes.position.needsUpdate = true;
     state.road.geometry.attributes.aBandEnergy.needsUpdate = true;
+    state.road.geometry.attributes.aBandPulse.needsUpdate = true;
+    state.road.geometry.attributes.aTrackPulse.needsUpdate = true;
     state.shoulder.geometry.attributes.position.needsUpdate = true;
     updateRails(rowSamples, step);
   }
@@ -1094,19 +1491,25 @@
       var aheadA = ROAD_NEAR + row * step;
       var aheadB = aheadA + step;
       var leftOffset = row * 6;
-      var railLiftA = 0.12 + state.bands[Math.min(7, Math.floor(row / 14))] * 0.12;
-      var railLiftB = 0.12 + state.bands[Math.min(7, Math.floor((row + 1) / 14))] * 0.12;
+      var leftEnergyA = spectrumTrackLaneValueAtRow(row, 0, false);
+      var leftEnergyB = spectrumTrackLaneValueAtRow(row + 1, 0, false);
+      var rightEnergyA = spectrumTrackLaneValueAtRow(row, ROAD_TRACK_LANE_COUNT - 1, false);
+      var rightEnergyB = spectrumTrackLaneValueAtRow(row + 1, ROAD_TRACK_LANE_COUNT - 1, false);
+      var leftLiftA = 0.12 + leftEnergyA * 0.08 + spectrumTrackLaneValueAtRow(row, 0, true) * 0.12;
+      var leftLiftB = 0.12 + leftEnergyB * 0.08 + spectrumTrackLaneValueAtRow(row + 1, 0, true) * 0.12;
+      var rightLiftA = 0.12 + rightEnergyA * 0.08 + spectrumTrackLaneValueAtRow(row, ROAD_TRACK_LANE_COUNT - 1, true) * 0.12;
+      var rightLiftB = 0.12 + rightEnergyB * 0.08 + spectrumTrackLaneValueAtRow(row + 1, ROAD_TRACK_LANE_COUNT - 1, true) * 0.12;
       state.leftRailPositions[leftOffset] = rowSamples[row].x - ROAD_HALF_WIDTH - 0.36;
-      state.leftRailPositions[leftOffset + 1] = ROAD_BASE_Y + rowSamples[row].y + railLiftA;
+      state.leftRailPositions[leftOffset + 1] = ROAD_BASE_Y + rowSamples[row].y + leftLiftA;
       state.leftRailPositions[leftOffset + 2] = -aheadA;
       state.leftRailPositions[leftOffset + 3] = rowSamples[row + 1].x - ROAD_HALF_WIDTH - 0.36;
-      state.leftRailPositions[leftOffset + 4] = ROAD_BASE_Y + rowSamples[row + 1].y + railLiftB;
+      state.leftRailPositions[leftOffset + 4] = ROAD_BASE_Y + rowSamples[row + 1].y + leftLiftB;
       state.leftRailPositions[leftOffset + 5] = -aheadB;
       state.rightRailPositions[leftOffset] = rowSamples[row].x + ROAD_HALF_WIDTH + 0.36;
-      state.rightRailPositions[leftOffset + 1] = ROAD_BASE_Y + rowSamples[row].y + railLiftA;
+      state.rightRailPositions[leftOffset + 1] = ROAD_BASE_Y + rowSamples[row].y + rightLiftA;
       state.rightRailPositions[leftOffset + 2] = -aheadA;
       state.rightRailPositions[leftOffset + 3] = rowSamples[row + 1].x + ROAD_HALF_WIDTH + 0.36;
-      state.rightRailPositions[leftOffset + 4] = ROAD_BASE_Y + rowSamples[row + 1].y + railLiftB;
+      state.rightRailPositions[leftOffset + 4] = ROAD_BASE_Y + rowSamples[row + 1].y + rightLiftB;
       state.rightRailPositions[leftOffset + 5] = -aheadB;
     }
     state.leftRail.geometry.attributes.position.needsUpdate = true;
@@ -1203,16 +1606,56 @@
     counts.cactus += 1;
   }
 
-  function applyBiomePalette(index) {
+  function setBlendedHexColor(target, currentHex, nextHex, blend) {
+    var amount = clamp01(blend);
+    target.setRGB(
+      lerp((currentHex >> 16 & 255) / 255, (nextHex >> 16 & 255) / 255, amount),
+      lerp((currentHex >> 8 & 255) / 255, (nextHex >> 8 & 255) / 255, amount),
+      lerp((currentHex & 255) / 255, (nextHex & 255) / 255, amount)
+    );
+  }
+
+  function applyBiomePalette(index, nextIndex, blend) {
     if (!state.sceneryMaterials || index < 0 || index >= BIOME_PALETTES.length) return;
+    if (nextIndex == null || nextIndex < 0 || nextIndex >= BIOME_PALETTES.length) nextIndex = index;
     var palette = BIOME_PALETTES[index];
-    state.shoulderMaterial.color.setHex(palette.ground);
-    state.sceneryMaterials.mountain.color.setHex(palette.mountain);
-    state.sceneryMaterials.mound.color.setHex(palette.mound);
-    state.sceneryMaterials.trunk.color.setHex(palette.trunk);
-    state.sceneryMaterials.crown.color.setHex(palette.crown);
-    state.sceneryMaterials.cactus.color.setHex(palette.crown);
-    state.sceneryMaterials.water.color.setHex(palette.water);
+    var nextPalette = BIOME_PALETTES[nextIndex];
+    setBlendedHexColor(state.shoulderMaterial.color, palette.ground, nextPalette.ground, blend);
+    setBlendedHexColor(state.sceneryMaterials.mountain.color, palette.mountain, nextPalette.mountain, blend);
+    setBlendedHexColor(state.sceneryMaterials.mound.color, palette.mound, nextPalette.mound, blend);
+    setBlendedHexColor(state.sceneryMaterials.trunk.color, palette.trunk, nextPalette.trunk, blend);
+    setBlendedHexColor(state.sceneryMaterials.crown.color, palette.crown, nextPalette.crown, blend);
+    setBlendedHexColor(state.sceneryMaterials.cactus.color, palette.crown, nextPalette.crown, blend);
+    setBlendedHexColor(state.sceneryMaterials.waterLeft.color, palette.water, nextPalette.water, blend);
+    setBlendedHexColor(state.sceneryMaterials.waterRight.color, palette.water, nextPalette.water, blend);
+  }
+
+  function biomeWaterForSide(index, beachWaterSide, side) {
+    if (index === 1) return 1;
+    if (index === 4 && beachWaterSide === side) return 1;
+    return 0;
+  }
+
+  function syncBiomeTransition(distance) {
+    var biome = biomeStateAtDistance(distance, state.seed);
+    state.biomeIndex = biome.index;
+    state.nextBiomeIndex = biome.nextIndex;
+    state.biomeBlend = biome.blend;
+    state.biomeFade = 1;
+    applyBiomePalette(biome.index, biome.nextIndex, biome.blend);
+    var currentBeachWaterSide = biome.zone % 2 ? -1 : 1;
+    var nextBeachWaterSide = (biome.zone + 1) % 2 ? -1 : 1;
+    state.leftWaterAmount = lerp(
+      biomeWaterForSide(biome.index, currentBeachWaterSide, -1),
+      biomeWaterForSide(biome.nextIndex, nextBeachWaterSide, -1),
+      biome.blend
+    );
+    state.rightWaterAmount = lerp(
+      biomeWaterForSide(biome.index, currentBeachWaterSide, 1),
+      biomeWaterForSide(biome.nextIndex, nextBeachWaterSide, 1),
+      biome.blend
+    );
+    return biome;
   }
 
   function updateWeather(dt) {
@@ -1239,16 +1682,9 @@
 
   function updateLandscape(dt) {
     if (!state.sceneryRoot || !state.sceneryMaterials) return;
-    var nextBiome = biomeIndexAtDistance(state.travel + ROAD_LENGTH * 0.34, state.seed);
-    if (nextBiome !== state.biomeIndex) {
-      state.biomeIndex = nextBiome;
-      state.biomeFade = 1;
-      applyBiomePalette(nextBiome);
-    }
-
-    var currentBiome = state.biomeIndex;
+    var biome = syncBiomeTransition(state.travel + ROAD_LENGTH * 0.34);
     var counts = { mountain: 0, mound: 0, tree: 0, cactus: 0, cactusArm: 0 };
-    var zone = Math.floor((state.travel + ROAD_LENGTH * 0.34) / BIOME_ZONE_LENGTH);
+    var zone = biome.zone;
     var beachWaterSide = zone % 2 ? -1 : 1;
     for (var index = 0; index < SCENERY_INSTANCE_COUNT; index++) {
       var placement = recycledWorldPlacement(index, SCENERY_SPACING, SCENERY_INSTANCE_COUNT, 8, state.travel, SCENERY_PASS_DISTANCE);
@@ -1306,14 +1742,13 @@
       mesh.instanceMatrix.needsUpdate = true;
     });
 
-    var waterVisible = currentBiome === 1 || currentBiome === 4;
     var waterSample = localRoadSample(ROAD_LENGTH * 0.52);
     state.leftWater.position.set(waterSample.x - 16, ROAD_BASE_Y + waterSample.y - 0.018, -ROAD_LENGTH * 0.52);
     state.rightWater.position.set(waterSample.x + 16, ROAD_BASE_Y + waterSample.y - 0.018, -ROAD_LENGTH * 0.52);
     state.leftWater.scale.set(22, ROAD_LENGTH * 1.18, 1);
     state.rightWater.scale.set(22, ROAD_LENGTH * 1.18, 1);
-    state.leftWater.visible = waterVisible && (currentBiome === 1 || beachWaterSide < 0);
-    state.rightWater.visible = waterVisible && (currentBiome === 1 || beachWaterSide > 0);
+    state.leftWater.visible = state.leftWaterAmount > 0.01;
+    state.rightWater.visible = state.rightWaterAmount > 0.01;
   }
 
   function updateLandmarks() {
@@ -1347,12 +1782,29 @@
 
   function updateAudioState(audio, fx, dt) {
     var intensity = clamp(Number(fx && fx.intensity) || 0.85, 0.1, 2.2);
+    var chartCue = rhythmChartCueFrame(
+      audio,
+      state.trackPreviousBands,
+      state.trackPreviousBeat,
+      state.lastTrigger,
+      state.trackCueAge,
+      state.trackCueCooldown,
+      dt
+    );
+    state.trackCueAge = chartCue.cueAge;
+    state.trackCueCooldown = chartCue.cooldown;
+    state.trackPreviousBeat = audio.beat;
+    state.trackPreviousBands = audio.bands.slice();
+    if (chartCue.emitted) state.pendingTrigger = Math.max(state.pendingTrigger, chartCue.strength);
     for (var index = 0; index < ROAD_BAND_COUNT; index++) {
       var target = clamp01(audio.bands[index]) * intensity;
       state.bands[index] = damp(state.bands[index], target, target > state.bands[index] ? 16 : 4.6, dt);
     }
     var triggerHit = audio.trigger > 0.28 && state.lastTrigger <= 0.28;
-    if (triggerHit) state.boost = Math.max(state.boost, 0.72 + audio.trigger * 0.28);
+    if (triggerHit) {
+      state.boost = Math.max(state.boost, 0.72 + audio.trigger * 0.28);
+      state.pendingTrigger = Math.max(state.pendingTrigger, audio.trigger);
+    }
     state.lastTrigger = audio.trigger;
     state.boost *= Math.exp(-2.9 * dt);
     state.beat = damp(state.beat, Math.max(audio.beat, audio.trigger * 0.84), audio.beat > state.beat ? 20 : 5.4, dt);
@@ -1402,7 +1854,8 @@
       state.sceneryMaterials.trunk.opacity = worldOpacity * 0.78;
       state.sceneryMaterials.crown.opacity = worldOpacity * 0.78;
       state.sceneryMaterials.cactus.opacity = worldOpacity * 0.82;
-      state.sceneryMaterials.water.opacity = worldOpacity * (0.52 + state.bands[6] * 0.16);
+      state.sceneryMaterials.waterLeft.opacity = worldOpacity * state.leftWaterAmount * (0.52 + state.bands[6] * 0.16);
+      state.sceneryMaterials.waterRight.opacity = worldOpacity * state.rightWaterAmount * (0.52 + state.bands[6] * 0.16);
     }
     if (state.landmarkMaterials) {
       state.landmarkMaterials.body.opacity = worldOpacity * 0.76;
@@ -1431,6 +1884,18 @@
     state.scene = null;
     state.road = null;
     state.roadMaterial = null;
+    state.roadPositions = null;
+    state.roadEnergy = null;
+    state.roadPulse = null;
+    state.roadTrackPulse = null;
+    state.spectrumEnergyHistory = null;
+    state.spectrumPulseHistory = null;
+    state.trackPulseHistory = null;
+    state.spectrumHead = -1;
+    state.spectrumSamples = 0;
+    state.spectrumDistance = 0;
+    state.spectrumWavePeak = 0;
+    state.trackNotePeak = 0;
     state.shoulder = null;
     state.leftRail = null;
     state.rightRail = null;
@@ -1460,14 +1925,23 @@
     state.landmarks = [];
     state.landmarkMaterials = null;
     state.biomeIndex = -1;
+    state.nextBiomeIndex = -1;
+    state.biomeBlend = 0;
     state.biomeFade = 0;
+    state.leftWaterAmount = 0;
+    state.rightWaterAmount = 0;
     state.weatherIndex = 0;
     state.nextWeatherIndex = 0;
     state.weatherBlend = 0;
     state.celestialIndex = 0;
     state.nextCelestialIndex = 0;
     state.activeCelestialIndex = -1;
+    state.activeCelestialZone = -1;
     state.celestialOpacity = 0;
+    state.celestialAxialTilt = 0;
+    state.celestialAxisAzimuth = 0;
+    state.celestialAxisX = 0;
+    state.celestialAxisZ = 0;
     state.rainAmount = 0;
     state.snowAmount = 0;
     state.visibleLandmark = '';
@@ -1501,6 +1975,7 @@
     state.time += dt;
     state.travel += state.speed * dt;
     if (state.travel > 100000) state.travel -= 50000;
+    advanceSpectrumHistory(state.speed * dt);
     state.root.position.copy(ctx.camera.position);
     state.root.quaternion.copy(ctx.camera.quaternion);
     var curveNow = roadCenterAt(state.travel + 18, state.seed) - roadCenterAt(state.travel - 18, state.seed);
@@ -1508,7 +1983,7 @@
     state.roll = damp(state.roll, targetRoll, CAMERA_ROLL_RESPONSE, dt);
     state.rollQuaternion.setFromAxisAngle(state.rollAxis, state.roll);
     state.root.quaternion.multiply(state.rollQuaternion);
-    updateRoadGeometry(audio);
+    updateRoadGeometry();
     updateRoadsideLights();
     updateWeather(dt);
     updateLandscape(dt);
@@ -1534,18 +2009,28 @@
       state.beat = 0;
       state.lastTrigger = 0;
       state.biomeIndex = -1;
+      state.nextBiomeIndex = -1;
+      state.biomeBlend = 0;
       state.biomeFade = 0;
+      state.leftWaterAmount = 0;
+      state.rightWaterAmount = 0;
       state.weatherIndex = 0;
       state.nextWeatherIndex = 0;
       state.weatherBlend = 0;
       state.celestialIndex = 0;
       state.nextCelestialIndex = 0;
       state.activeCelestialIndex = -1;
+      state.activeCelestialZone = -1;
       state.celestialOpacity = 0;
+      state.celestialAxialTilt = 0;
+      state.celestialAxisAzimuth = 0;
+      state.celestialAxisX = 0;
+      state.celestialAxisZ = 0;
       state.rainAmount = 0;
       state.snowAmount = 0;
       state.visibleLandmark = '';
       state.bands = [0, 0, 0, 0, 0, 0, 0, 0];
+      resetSpectrumHistory();
       ensureLayer(ctx.scene);
     }
   }
@@ -1560,11 +2045,24 @@
       opacity: state.opacity,
       bands: state.bands.slice(),
       biome: state.biomeIndex >= 0 ? BIOME_NAMES[state.biomeIndex] : '',
+      nextBiome: state.nextBiomeIndex >= 0 ? BIOME_NAMES[state.nextBiomeIndex] : '',
+      biomeBlend: state.biomeBlend,
+      leftWaterAmount: state.leftWaterAmount,
+      rightWaterAmount: state.rightWaterAmount,
       weather: WEATHER_NAMES[state.weatherIndex] || '',
       nextWeather: WEATHER_NAMES[state.nextWeatherIndex] || '',
       weatherBlend: state.weatherBlend,
       celestial: state.celestialOpacity > 0.01 && state.activeCelestialIndex >= 0 ? CELESTIAL_NAMES[state.activeCelestialIndex] || '' : '',
       nextCelestial: state.nextWeatherIndex >= 4 ? CELESTIAL_NAMES[state.nextCelestialIndex] || '' : '',
+      celestialSide: state.activeCelestialZone >= 0 && state.celestialRoot ? (state.celestialRoot.position.x < 0 ? 'left' : 'right') : '',
+      celestialPosition: state.activeCelestialZone >= 0 && state.celestialRoot ? {
+        x: state.celestialRoot.position.x,
+        y: state.celestialRoot.position.y,
+        z: state.celestialRoot.position.z
+      } : null,
+      celestialAxialTilt: state.celestialAxialTilt,
+      celestialAxisAzimuth: state.celestialAxisAzimuth,
+      celestialAxis: state.activeCelestialZone >= 0 ? { x: state.celestialAxisX, z: state.celestialAxisZ } : null,
       celestial3D: !!(state.celestialMesh && state.celestialMesh.geometry && state.celestialMesh.geometry.type === 'SphereGeometry'),
       celestialMeshCount: state.celestialMesh ? 1 + (state.celestialRing ? 1 : 0) : 0,
       celestialTexturesReady: celestialTextureReadyCount(),
@@ -1576,6 +2074,16 @@
         ? state.mountainMesh.count + state.moundMesh.count + state.treeTrunkMesh.count + state.cactusStemMesh.count
         : 0,
       roadVertices: (ROAD_SEGMENT_COUNT + 1) * ROAD_COLUMN_COUNT,
+      roadWaveVertices: state.roadPulse ? state.roadPulse.length : 0,
+      roadTrackVertices: state.roadTrackPulse ? state.roadTrackPulse.length : 0,
+      spectrumHistorySamples: state.spectrumSamples,
+      spectrumWavePeak: state.spectrumWavePeak,
+      trackNotePeak: state.trackNotePeak,
+      spectrumEventLanePeak: state.spectrumEventLanePeak,
+      trackEventCount: state.trackEventIndex,
+      trackVisitedLanes: [0, 1, 2, 3].filter(function (lane) { return state.trackVisitedMask & (1 << lane); }).length,
+      lastTrackLane: state.lastTrackLane,
+      spectrumTravelPhase: clamp01(state.spectrumDistance / ROAD_SPECTRUM_STEP),
       lightPairs: LIGHT_PAIR_COUNT
     };
   }
@@ -1591,9 +2099,19 @@
       roadCenterAt: roadCenterAt,
       roadElevationAt: roadElevationAt,
       roadBandForSide: roadBandForSide,
+      roadTrackLaneForSide: roadTrackLaneForSide,
+      roadTrackLaneCenter: roadTrackLaneCenter,
+      roadTrackLaneForBand: roadTrackLaneForBand,
+      spectrumHistorySlotForRow: spectrumHistorySlotForRow,
+      spectrumPulseForBand: spectrumPulseForBand,
+      rhythmChartCueFrame: rhythmChartCueFrame,
+      rhythmTrackEventFrame: rhythmTrackEventFrame,
       biomeIndexAtDistance: biomeIndexAtDistance,
+      biomeStateAtDistance: biomeStateAtDistance,
       weatherStateAtDistance: weatherStateAtDistance,
       celestialIndexForZone: celestialIndexForZone,
+      celestialPositionForZone: celestialPositionForZone,
+      celestialAxialTiltForZone: celestialAxialTiltForZone,
       landmarkIndexAtDistance: landmarkIndexAtDistance,
       recycledWorldPlacement: recycledWorldPlacement,
       readAudio: readAudio,
@@ -1601,9 +2119,7 @@
       setJourneyForQa: function (distance, seed) {
         state.travel = Math.max(0, Number(distance) || 0);
         if (seed != null) state.seed = Number(seed) || 0;
-        state.biomeIndex = biomeIndexAtDistance(state.travel + ROAD_LENGTH * 0.34, state.seed);
-        state.biomeFade = 1;
-        applyBiomePalette(state.biomeIndex);
+        syncBiomeTransition(state.travel + ROAD_LENGTH * 0.34);
         var weather = weatherStateAtDistance(state.travel + ROAD_LENGTH * 0.34, state.seed);
         state.weatherIndex = weather.index;
         state.nextWeatherIndex = weather.nextIndex;
@@ -1615,6 +2131,12 @@
         segmentCount: ROAD_SEGMENT_COUNT,
         columnCount: ROAD_COLUMN_COUNT,
         bandCount: ROAD_BAND_COUNT,
+        spectrumSampleCount: ROAD_SPECTRUM_SAMPLE_COUNT,
+        trackMaxEventLanes: ROAD_TRACK_MAX_EVENT_LANES,
+        trackMinEventGap: ROAD_TRACK_MIN_EVENT_GAP,
+        trackOnsetThreshold: ROAD_TRACK_ONSET_THRESHOLD,
+        trackLaneCount: ROAD_TRACK_LANE_COUNT,
+        trackLaneBands: ROAD_TRACK_LANE_BANDS.map(function (bands) { return bands.slice(); }),
         lightPairCount: LIGHT_PAIR_COUNT,
         sceneryInstanceCount: SCENERY_INSTANCE_COUNT,
         scenerySpacing: SCENERY_SPACING,

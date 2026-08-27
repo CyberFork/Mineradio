@@ -1,5 +1,12 @@
 // ============================================================
+function resetDesktopWindowShellScroll() {
+  var shell = document.getElementById('desktop-window-shell');
+  if (!shell) return;
+  if (shell.scrollLeft) shell.scrollLeft = 0;
+  if (shell.scrollTop) shell.scrollTop = 0;
+}
 function refreshMainRendererViewport(reason) {
+  resetDesktopWindowShellScroll();
   if (typeof camera !== 'undefined' && camera) {
     camera.aspect = Math.max(1, innerWidth) / Math.max(1, innerHeight);
     camera.updateProjectionMatrix();
@@ -19,6 +26,8 @@ window.addEventListener('resize', function () {
   scheduleMainRendererViewportRefresh('resize');
   if (desktopRuntimeState.fullscreen || desktopFullscreenActive || document.fullscreenElement || document.body.classList.contains('desktop-fullscreen')) layoutFullscreenDiyZone();
 });
+var desktopWindowShell = document.getElementById('desktop-window-shell');
+if (desktopWindowShell) desktopWindowShell.addEventListener('scroll', resetDesktopWindowShellScroll, { passive: true });
 document.addEventListener('keydown', function (e) {
   if (isTypingTarget(e.target)) return;
   if (handleConfiguredLocalHotkey(e)) return;

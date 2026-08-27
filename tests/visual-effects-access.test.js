@@ -35,6 +35,9 @@ assert(/force === false \|\| \(currentlyOpen && force !== true\)/.test(bindings)
 assert(bindings.includes("el.classList.add('show')"), 'clicking the visual launcher must pin the panel open');
 assert(bindings.includes("openFab.setAttribute('aria-expanded', 'true')"), 'visual launcher expanded state must be announced');
 assert(/else if \(e\.code === 'KeyP'\) \{\s*if \(!immersiveMode\) toggleFxPanel\(\);/.test(shortcuts), 'P must open visual presets without requiring DIY mode');
+assert(/body\.desktop-shell #desktop-window-shell\s*\{[\s\S]{0,220}overflow:\s*clip/.test(css), 'the desktop shell must clip overflow without becoming a scroll container');
+assert(/function resetDesktopWindowShellScroll\(\)[\s\S]{0,360}shell\.scrollLeft = 0/.test(shortcuts), 'viewport refresh must recover a stale horizontal shell offset');
+assert(/desktopWindowShell\.addEventListener\('scroll', resetDesktopWindowShellScroll/.test(shortcuts), 'desktop shell scrolling must be corrected immediately');
 
 assert(guide.includes("title: '不是一个特效：这里有 11 套视觉预设'"), 'startup guide must state that multiple visual effects exist');
 assert(guide.includes("action: 'open-visual-presets'"), 'visual guide step must expose a direct action');
