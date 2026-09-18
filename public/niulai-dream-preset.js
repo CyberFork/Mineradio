@@ -14,6 +14,17 @@
   var CHAPTER_DURATION = 22;
   var CHAPTER_TRANSITION_START = 0.72;
   var CHAPTER_NAMES = ['desert-lullaby', 'grassland-awakening', 'forest-stand', 'ink-dream'];
+  var FLIGHT_FLYER_COUNT = 2;
+  var FLIGHT_EVENT_MIN_GAP = 0.42;
+  var FLIGHT_EVENT_THRESHOLD = 0.18;
+  var FLIGHT_LANE_BANDS = [[0, 4], [2, 6], [3, 7], [1, 5]];
+  var FLIGHT_LANE_SEQUENCE = [0, 1, 3, 2];
+  var FLIGHT_VISIBLE_BOUNDS = {
+    cow: { minX: -0.80, maxX: 4.05, minY: -0.35, maxY: 3.80 },
+    lark: { minX: -5.30, maxX: 5.30, minY: 1.00, maxY: 5.80 }
+  };
+  var FLIGHT_LOOP_PADDING = 1.80;
+  var FLIGHT_BASE_SPEEDS = [2.25, 3.25];
   var CHAPTER_PALETTES = [
     { sky: 0x141619, ground: 0x4a4638, mountain: 0x222b2d, grass: 0xd1ac54, portal: 0x78c7b7, sun: 0xe8b85f },
     { sky: 0x071b1b, ground: 0x245844, mountain: 0x173b36, grass: 0x78a15c, portal: 0x69b8a2, sun: 0xf0c779 },
@@ -41,6 +52,153 @@
   function seeded(index, salt) {
     var value = Math.sin(index * 91.173 + salt * 47.319) * 43758.5453;
     return value - Math.floor(value);
+  }
+
+  function positiveModulo(value, modulus) {
+    return ((value % modulus) + modulus) % modulus;
+  }
+
+  function flightLaneForBand(band) {
+    var safeBand = Math.max(0, Math.min(BAND_COUNT - 1, Math.round(Number(band) || 0)));
+    for (var lane = 0; lane < FLIGHT_LANE_BANDS.length; lane++) {
+      if (FLIGHT_LANE_BANDS[lane].indexOf(safeBand) >= 0) return lane;
+    }
+    return 0;
+  }
+
+  function flightDirectionForBand(band, eventIndex, lastDirection) {
+    var lane = flightLaneForBand(band);
+    var sequenceLane = FLIGHT_LANE_SEQUENCE[positiveModulo(Math.floor(Number(eventIndex) || 0), FLIGHT_LANE_SEQUENCE.length)];
+    var side = positiveModulo(sequenceLane + lane, FLIGHT_LANE_BANDS.length) < 2 ? -1 : 1;
+    var safeLastDirection = Number(lastDirection);
+    if (side === safeLastDirection) side *= -1;
+    var vertical = (positiveModulo(Math.floor(Number(eventIndex) || 0) + Number(band || 0), 3) === 0 ? 1 : -1);
+    return { x: side, y: vertical, lane: lane };
+  }
+
+  function flightCueFrame(currentBands, previousBands, beat, previousBeat, cueAge, cooldown, eventIndex, lastDirection, dt) {
+    var elapsed = clamp(Number(dt) || 0, 0, 0.1);
+    var nextAge = Math.max(0, Number(cueAge) || 0) + elapsed;
+    var nextCooldown = Math.max(0, (Number(cooldown) || 0) - elapsed);
+    var onsetPeak = 0;
+    var onsetTotal = 0;
+    var bandTotal = 0;
+    var dominantBand = 0;
+    var dominantValue = 0;
+    for (var band = 0; band < BAND_COUNT; band++) {
+      var current = clamp01(currentBands && currentBands[band]);
+      var previous = clamp01(previousBands && previousBands[band]);
+      var onset = Math.max(0, current - previous);
+      onsetPeak = Math.max(onsetPeak, onset);
+      onsetTotal += onset;
+      bandTotal += current;
+      if (current > dominantValue) {
+        dominantValue = current;
+        dominantBand = band;
+      }
+    }
+    var onsetStrength = clamp01(onsetPeak * 2.4 + onsetTotal / BAND_COUNT * 1.7);
+    var safeBeat = clamp01(beat);
+    var beatRise = Math.max(0, safeBeat - clamp01(previousBeat));
+    var activeEnergy = bandTotal / BAND_COUNT;
+    var beatCandidate = beatRise > 0.055 || (safeBeat > 0.68 && nextAge > 0.12);
+    var onsetCandidate = onsetStrength >= FLIGHT_EVENT_THRESHOLD;
+    var fillGap = clamp(0.62 - activeEnergy * 0.24 - safeBeat * 0.10, 0.34, 0.62);
+    var fillCandidate = activeEnergy > 0.12 && nextAge >= fillGap;
+    var emitted = nextCooldown <= 0 && (beatCandidate || onsetCandidate || fillCandidate);
+    var direction = flightDirectionForBand(dominantBand, eventIndex, lastDirection);
+    var strength = 0;
+    var nextEventIndex = Math.max(0, Math.floor(Number(eventIndex) || 0));
+    var nextDirection = Number(lastDirection);
+    if (emitted) {
+      strength = Math.max(
+        beatCandidate ? safeBeat : 0,
+        onsetCandidate ? onsetStrength : 0,
+        fillCandidate ? 0.38 + activeEnergy * 0.28 : 0
+      );
+      strength = Math.max(0.34, clamp01(strength));
+      nextAge = 0;
+      nextCooldown = FLIGHT_EVENT_MIN_GAP;
+      nextEventIndex += 1;
+      nextDirection = direction.x;
+    }
+    return {
+      emitted: emitted,
+      strength: strength,
+      onsetStrength: onsetStrength,
+      activeEnergy: activeEnergy,
+      dominantBand: dominantBand,
+      direction: direction,
+      cueAge: nextAge,
+      cooldown: nextCooldown,
+      nextEventIndex: nextEventIndex,
+      lastDirection: nextDirection
+    };
+  }
+
+  function flightLoopBounds(bounds) {
+    return {
+      minX: bounds.minX - FLIGHT_LOOP_PADDING,
+      maxX: bounds.maxX + FLIGHT_LOOP_PADDING,
+      minY: bounds.minY - FLIGHT_LOOP_PADDING,
+      maxY: bounds.maxY + FLIGHT_LOOP_PADDING
+    };
+  }
+
+  function advanceFlyerMotion(position, velocity, dt, bounds, loopBounds) {
+    var elapsed = clamp(Number(dt) || 0, 0, 0.1);
+    var next = { x: Number(position && position.x) || 0, y: Number(position && position.y) || 0 };
+    var nextVelocity = { x: Number(velocity && velocity.x) || 0, y: Number(velocity && velocity.y) || 0 };
+    var wrapped = false;
+    var wrappedX = false;
+    var wrappedY = false;
+    var bouncedX = false;
+    var bouncedY = false;
+    next.x += nextVelocity.x * elapsed;
+    next.y += nextVelocity.y * elapsed;
+    if (next.x < loopBounds.minX) {
+      next.x = loopBounds.maxX;
+      wrapped = true;
+      wrappedX = true;
+    } else if (next.x > loopBounds.maxX) {
+      next.x = loopBounds.minX;
+      wrapped = true;
+      wrappedX = true;
+    }
+    if (next.y < loopBounds.minY) {
+      next.y = loopBounds.maxY;
+      wrapped = true;
+      wrappedY = true;
+    } else if (next.y > loopBounds.maxY) {
+      next.y = loopBounds.minY;
+      wrapped = true;
+      wrappedY = true;
+    }
+    if (!wrappedX && next.x <= bounds.minX) {
+      next.x = bounds.minX;
+      if (nextVelocity.x < 0) nextVelocity.x = Math.abs(nextVelocity.x);
+      bouncedX = true;
+    } else if (!wrappedX && next.x >= bounds.maxX) {
+      next.x = bounds.maxX;
+      if (nextVelocity.x > 0) nextVelocity.x = -Math.abs(nextVelocity.x);
+      bouncedX = true;
+    }
+    if (!wrappedY && next.y <= bounds.minY) {
+      next.y = bounds.minY;
+      if (nextVelocity.y < 0) nextVelocity.y = Math.abs(nextVelocity.y);
+      bouncedY = true;
+    } else if (!wrappedY && next.y >= bounds.maxY) {
+      next.y = bounds.maxY;
+      if (nextVelocity.y > 0) nextVelocity.y = -Math.abs(nextVelocity.y);
+      bouncedY = true;
+    }
+    return {
+      position: next,
+      velocity: nextVelocity,
+      wrapped: wrapped,
+      bouncedX: bouncedX,
+      bouncedY: bouncedY
+    };
   }
 
   function chapterStateAtTime(time) {
@@ -82,6 +240,7 @@
     time: 0,
     journey: 0,
     beat: 0,
+    energy: 0,
     bass: 0,
     mid: 0,
     treble: 0,
@@ -106,6 +265,14 @@
     capeBasePositions: null,
     lark: null,
     larkWings: [],
+    flyers: [],
+    flightPreviousBands: [0, 0, 0, 0, 0, 0, 0, 0],
+    flightPreviousBeat: 0,
+    flightCueAge: 0,
+    flightCueCooldown: 0,
+    flightEventIndex: 0,
+    flightLastDirection: 0,
+    flightTurnCount: 0,
     portalRoot: null,
     mountainRoot: null,
     mountainMesh: null,
@@ -241,6 +408,7 @@
     createCape(cow, capeMaterial);
     state.cow = cow;
     state.root.add(cow);
+    registerFlyer(cow, 'cow', 0, -1);
   }
 
   function triangleGeometry(points) {
@@ -272,6 +440,7 @@
     });
     state.lark = lark;
     state.root.add(lark);
+    registerFlyer(lark, 'lark', 1, 1);
   }
 
   function createEnvironment() {
@@ -476,7 +645,6 @@
 
   function updateCharacters(dt) {
     var stride = state.time * (2.6 + state.bass * 4.4);
-    state.cow.position.y = -0.18 + Math.sin(stride * 2) * (0.035 + state.bass * 0.085) + state.beat * 0.10;
     state.cow.rotation.y = -0.08 + Math.sin(state.time * 0.34) * 0.055;
     state.cowBody.scale.y = 1.03 + state.bass * 0.045;
     state.cowHead.rotation.x = Math.sin(stride) * (0.025 + state.mid * 0.055) - state.beat * 0.035;
@@ -486,10 +654,21 @@
     if (state.cow.userData.tail) state.cow.userData.tail.rotation.z = Math.sin(state.time * 2.7) * (0.18 + state.treble * 0.28);
     updateCape();
 
-    var flight = state.time * (0.62 + state.treble * 0.18);
-    state.lark.position.x = -1.6 + Math.sin(flight) * 1.0;
-    state.lark.position.y = 3.15 + Math.cos(flight * 1.7) * 0.30 + state.treble * 0.18;
-    state.lark.rotation.z = Math.sin(flight * 1.2) * 0.12;
+    state.flyers.forEach(function (flyer) {
+      if (!flyer.active || !flyer.object) return;
+      var nextVelocity = {
+        x: damp(flyer.velocity.x, flyer.targetVelocity.x, 3.6, dt),
+        y: damp(flyer.velocity.y, flyer.targetVelocity.y, 3.6, dt)
+      };
+      var motion = advanceFlyerMotion(flyer.object.position, nextVelocity, dt, flyer.bounds, flyer.loopBounds);
+      flyer.velocity = motion.velocity;
+      flyer.object.position.x = motion.position.x;
+      flyer.object.position.y = motion.position.y;
+      flyer.object.visible = true;
+      flyer.object.rotation.z = clamp(flyer.velocity.x * 0.035, -0.22, 0.22);
+      flyer.object.rotation.x = clamp(-flyer.velocity.y * 0.025, -0.16, 0.16);
+      if (motion.bouncedX || motion.bouncedY || motion.wrapped) flyer.wallHits += 1;
+    });
     var flap = Math.sin(state.time * (7.2 + state.treble * 7.0));
     state.larkWings.forEach(function (wing) {
       wing.rotation.z = wing.userData.side * (0.24 + flap * (0.34 + state.treble * 0.28));
@@ -504,6 +683,65 @@
     state.dreamParticles.position.y = Math.sin(state.time * 0.35) * 0.18;
     state.dreamParticleMaterial.size = 0.10 + state.treble * 0.15 + state.beat * 0.04;
     state.dreamParticleMaterial.userData.niuFrameOpacity = 0.40 + state.treble * 0.36;
+  }
+
+  function registerFlyer(object, id, speedScale, phase) {
+    if (!object || state.flyers.length >= FLIGHT_FLYER_COUNT) return null;
+    var bounds = FLIGHT_VISIBLE_BOUNDS[id];
+    if (!bounds) return null;
+    var baseSpeed = FLIGHT_BASE_SPEEDS[speedScale] || FLIGHT_BASE_SPEEDS[0];
+    var flyer = {
+      id: id,
+      object: object,
+      bounds: bounds,
+      loopBounds: flightLoopBounds(bounds),
+      baseSpeed: baseSpeed,
+      velocity: { x: (phase < 0 ? -1 : 1) * baseSpeed * 0.58, y: 0.12 * phase },
+      targetVelocity: { x: (phase < 0 ? -1 : 1) * baseSpeed * 0.58, y: 0.12 * phase },
+      active: true,
+      wallHits: 0
+    };
+    object.userData.niuFlyer = id;
+    object.userData.niuFlyerPoolIndex = state.flyers.length;
+    object.traverse(function (child) {
+      if (child.isMesh) child.frustumCulled = true;
+    });
+    state.flyers.push(flyer);
+    return flyer;
+  }
+
+  function applyFlightCue(cue) {
+    if (!cue || !cue.emitted) return;
+    state.flyers.forEach(function (flyer, index) {
+      if (!flyer.active) return;
+      var horizontal = cue.direction.x * (index % 2 === 0 ? 1 : -1);
+      var vertical = cue.direction.y * (index % 2 === 0 ? 1 : -1);
+      var speed = flyer.baseSpeed * (0.76 + cue.strength * 0.56 + state.energy * 0.28);
+      flyer.targetVelocity.x = horizontal * speed;
+      flyer.targetVelocity.y = vertical * speed * (0.22 + state.treble * 0.16);
+    });
+    state.flightTurnCount += 1;
+  }
+
+  function updateFlight(dt, audio) {
+    var cue = flightCueFrame(
+      audio.bands,
+      state.flightPreviousBands,
+      audio.beat,
+      state.flightPreviousBeat,
+      state.flightCueAge,
+      state.flightCueCooldown,
+      state.flightEventIndex,
+      state.flightLastDirection,
+      dt
+    );
+    state.flightPreviousBands = audio.bands.slice();
+    state.flightPreviousBeat = audio.beat;
+    state.flightCueAge = cue.cueAge;
+    state.flightCueCooldown = cue.cooldown;
+    state.flightEventIndex = cue.nextEventIndex;
+    state.flightLastDirection = cue.lastDirection;
+    applyFlightCue(cue);
   }
 
   function updateRipples() {
@@ -558,6 +796,15 @@
     state.cowLegs = [];
     state.larkWings = [];
     state.cow = null;
+    state.flyers = [];
+    state.flightPreviousBands = [0, 0, 0, 0, 0, 0, 0, 0];
+    state.flightPreviousBeat = 0;
+    state.flightCueAge = 0;
+    state.flightCueCooldown = 0;
+    state.flightEventIndex = 0;
+    state.flightLastDirection = 0;
+    state.flightTurnCount = 0;
+    state.energy = 0;
     state.cowBody = null;
     state.cowHead = null;
     state.cape = null;
@@ -606,12 +853,14 @@
     state.mid = damp(state.mid, audio.mid, 5.5, dt);
     state.treble = damp(state.treble, audio.treble, 5.8, dt);
     state.beat = Math.max(audio.beat, damp(state.beat, 0, 7.8, dt));
+    state.energy = damp(state.energy, audio.energy, 4.8, dt);
     state.time += dt * (0.90 + (Number(fx.speed) || 1) * 0.10);
     state.journey += dt * (0.42 + audio.energy * 1.45 + state.beat * 0.75);
     state.root.position.copy(ctx.camera.position);
     state.root.quaternion.copy(ctx.camera.quaternion);
     state.root.position.y += Math.sin(state.time * 0.28) * 0.025;
     updateChapter();
+    updateFlight(dt, audio);
     updateCharacters(dt);
     updateRipples();
     syncOpacity();
@@ -624,10 +873,18 @@
       state.time = 0;
       state.journey = 0;
       state.beat = 0;
+      state.energy = 0;
       state.bass = 0;
       state.mid = 0;
       state.treble = 0;
       state.bands = [0, 0, 0, 0, 0, 0, 0, 0];
+      state.flightPreviousBands = [0, 0, 0, 0, 0, 0, 0, 0];
+      state.flightPreviousBeat = 0;
+      state.flightCueAge = 0;
+      state.flightCueCooldown = 0;
+      state.flightEventIndex = 0;
+      state.flightLastDirection = 0;
+      state.flightTurnCount = 0;
       ensureLayer(ctx.scene);
     }
   }
@@ -649,6 +906,7 @@
       nextChapter: CHAPTER_NAMES[state.nextChapterIndex] || '',
       chapterBlend: state.chapterBlend,
       beat: state.beat,
+      energy: state.energy,
       bands: state.bands.slice(),
       cow3D: !!(state.cowBody && state.cowBody.geometry && state.cowBody.geometry.type === 'SphereGeometry'),
       capeVisible: !!(state.cape && state.cape.visible),
@@ -658,7 +916,22 @@
       mountainInstances: state.mountainMesh ? state.mountainMesh.count : 0,
       grassInstances: state.grassMesh ? state.grassMesh.count : 0,
       rippleCount: state.rippleMeshes.length,
-      motionPhase: state.cow ? state.cow.position.y : 0
+      motionPhase: state.cow ? state.cow.position.y : 0,
+      flight: {
+        flyerCount: state.flyers.length,
+        activeFlyers: state.flyers.reduce(function (count, flyer) { return count + (flyer.active ? 1 : 0); }, 0),
+        eventIndex: state.flightEventIndex,
+        turnCount: state.flightTurnCount,
+        lastDirection: state.flightLastDirection,
+        wallHits: state.flyers.reduce(function (count, flyer) { return count + flyer.wallHits; }, 0),
+        positions: state.flyers.map(function (flyer) {
+          return {
+            id: flyer.id,
+            x: flyer.object ? flyer.object.position.x : 0,
+            y: flyer.object ? flyer.object.position.y : 0
+          };
+        })
+      }
     };
   }
 
@@ -672,6 +945,10 @@
     _test: {
       readAudio: readAudio,
       chapterStateAtTime: chapterStateAtTime,
+      flightCueFrame: flightCueFrame,
+      flightDirectionForBand: flightDirectionForBand,
+      flightLoopBounds: flightLoopBounds,
+      advanceFlyerMotion: advanceFlyerMotion,
       setTimeForQa: function (time) {
         state.time = Math.max(0, Number(time) || 0);
         var chapter = chapterStateAtTime(state.time);
@@ -686,7 +963,15 @@
         grassCount: GRASS_COUNT,
         rippleCount: RIPPLE_COUNT,
         chapterDuration: CHAPTER_DURATION,
-        chapterNames: CHAPTER_NAMES.slice()
+        chapterNames: CHAPTER_NAMES.slice(),
+        flyerCount: FLIGHT_FLYER_COUNT,
+        flightEventMinGap: FLIGHT_EVENT_MIN_GAP,
+        flightEventThreshold: FLIGHT_EVENT_THRESHOLD,
+        flightLoopPadding: FLIGHT_LOOP_PADDING,
+        flightBounds: {
+          cow: Object.assign({}, FLIGHT_VISIBLE_BOUNDS.cow),
+          lark: Object.assign({}, FLIGHT_VISIBLE_BOUNDS.lark)
+        }
       }
     }
   };

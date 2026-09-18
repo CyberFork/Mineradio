@@ -183,12 +183,27 @@ async function main() {
 
   const motion = await evaluate(`(async () => {
     const cape = scene.getObjectByName('niulai-red-cape');
+    const cow = scene.getObjectByName('niulai-low-poly-calf');
     const lark = scene.getObjectByName('niulai-low-poly-lark');
     const last = cape.geometry.attributes.position.count - 1;
-    const before = { cape: cape.geometry.attributes.position.getY(last), larkX: lark.position.x, phase: MineradioNiuLaiDream.snapshot().motionPhase };
+    const beforeSnapshot = MineradioNiuLaiDream.snapshot();
+    const before = {
+      cape: cape.geometry.attributes.position.getY(last),
+      cowX: cow.position.x,
+      larkX: lark.position.x,
+      phase: beforeSnapshot.motionPhase,
+      flight: beforeSnapshot.flight
+    };
     await new Promise(resolve => setTimeout(resolve, 320));
     renderer.render(scene, camera);
-    const after = { cape: cape.geometry.attributes.position.getY(last), larkX: lark.position.x, phase: MineradioNiuLaiDream.snapshot().motionPhase };
+    const afterSnapshot = MineradioNiuLaiDream.snapshot();
+    const after = {
+      cape: cape.geometry.attributes.position.getY(last),
+      cowX: cow.position.x,
+      larkX: lark.position.x,
+      phase: afterSnapshot.motionPhase,
+      flight: afterSnapshot.flight
+    };
     clearInterval(window.__mineradioNiuLaiQaTimer);
     window.__mineradioNiuLaiQaTimer = 0;
     MineradioNiuLaiDream._test.setTimeForQa(22);
@@ -210,16 +225,19 @@ async function main() {
     assert.strictEqual(capture.snapshot.mountainInstances, 14, `${capture.name} mountain instance pool changed`);
     assert.strictEqual(capture.snapshot.grassInstances, 56, `${capture.name} grass instance pool changed`);
     assert.strictEqual(capture.snapshot.rippleCount, 8, `${capture.name} lost an audio-band ground echo`);
+    assert(capture.snapshot.flight && capture.snapshot.flight.flyerCount === 2 && capture.snapshot.flight.activeFlyers === 2, `${capture.name} flight pool is missing or unbounded`);
+    assert(capture.snapshot.flight.positions.every(position => Number.isFinite(position.x) && Number.isFinite(position.y)), `${capture.name} flight positions became non-finite`);
     assert(capture.pixelSpan > 45, `${capture.name} WebGL canvas has insufficient contrast`);
     assert(capture.nonBlack > 2400, `${capture.name} WebGL canvas is effectively blank`);
     assert(capture.average > 10, `${capture.name} WebGL canvas stayed too dark`);
-    assert(capture.cowProjection && Math.abs(capture.cowProjection.x) < 0.52 && capture.cowProjection.y > -0.72 && capture.cowProjection.y < 0.55, `${capture.name} calf left the safe frame`);
-    assert(capture.larkProjection && Math.abs(capture.larkProjection.x) < 0.55 && capture.larkProjection.y > -0.72 && capture.larkProjection.y < 0.60, `${capture.name} lark left the safe frame`);
+    assert(capture.cowProjection && Math.abs(capture.cowProjection.x) < 0.94 && capture.cowProjection.y > -0.95 && capture.cowProjection.y < 0.95, `${capture.name} calf left the safe frame`);
+    assert(capture.larkProjection && Math.abs(capture.larkProjection.x) < 0.94 && capture.larkProjection.y > -0.95 && capture.larkProjection.y < 0.95, `${capture.name} lark left the safe frame`);
     assert(/Cyberforker/.test(capture.authorText), `${capture.name} preset card lost the author credit`);
     assert.strictEqual(capture.shelfParentVisible, false, `${capture.name} playlist shelf covered the dream scene`);
   });
-  const motionDelta = Math.abs(motion.after.cape - motion.before.cape) + Math.abs(motion.after.larkX - motion.before.larkX) + Math.abs(motion.after.phase - motion.before.phase);
+  const motionDelta = Math.abs(motion.after.cape - motion.before.cape) + Math.abs(motion.after.cowX - motion.before.cowX) + Math.abs(motion.after.larkX - motion.before.larkX) + Math.abs(motion.after.phase - motion.before.phase);
   assert(motionDelta > 0.015, 'cape, lark, and calf stayed visually static under music input');
+  assert(motion.after.flight && motion.after.flight.turnCount >= motion.before.flight.turnCount, 'flight turn telemetry regressed during live playback');
   assert.strictEqual(presetCard.active, true, 'Niu Lai preset card did not show its selected state');
   assert(/Cyberforker/.test(presetCard.text), 'Niu Lai preset card did not show the Cyberforker credit');
   assert.strictEqual(presetCard.nameFits, true, 'Niu Lai preset card name overflowed its container');

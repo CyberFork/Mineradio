@@ -325,6 +325,7 @@ assert(beatSpeed > idleSpeed + 20, 'strong music beats must produce a material s
 assert(loader.includes("'highway-drive-preset.js'"), 'highway runtime must load before the main loop');
 assert(/MAX_VISUAL_PRESET_INDEX = 10/.test(core) && /HIGHWAY_PRESET_INDEX = 9/.test(core), 'preset 9 must survive startup and persistence clamps after later presets');
 assert(presets.includes("name: '无尽公路'") && /presetDisplayOrder = \[0, 6, 7, 8, 9/.test(presets), 'highway card must be directly visible with the sonic presets');
+assert(presets.includes("作者 <span class=\"pc-author-cyberforker\">Cyberforker</span>"), 'the Highway Drive card must credit Cyberforker');
 assert(/MineradioHighwayDrive\.onPresetChange/.test(presetGrid), 'preset changes must notify the highway runtime');
 assert(/MineradioHighwayDrive\.update/.test(mainLoop) && /visual\.highway-drive/.test(mainLoop), 'main loop must drive and measure the highway runtime');
 assert(/audio: sonicAudioFrame \|\|/.test(mainLoop), 'Highway Drive must receive the shared real-time spectrum frame instead of legacy aggregate energy only');

@@ -28,6 +28,9 @@ assert(api.constants.particleCount <= 192, 'dream particle pool must remain boun
 assert(api.constants.mountainCount <= 20, 'mountain instance pool must remain bounded');
 assert(api.constants.grassCount <= 64, 'grass instance pool must remain bounded');
 assert.strictEqual(api.constants.rippleCount, 8, 'one ground echo must represent each sonic band');
+assert.strictEqual(api.constants.flyerCount, 2, 'the dream flight pool must stay limited to the two authored models');
+assert(api.constants.flightEventMinGap >= 0.20, 'flight cues need a cooldown to avoid nauseating direction chatter');
+assert(api.constants.flightLoopPadding > 0, 'flyers need an unseen loop buffer outside the visible air wall');
 assert.deepStrictEqual(Array.from(api.constants.chapterNames), ['desert-lullaby', 'grassland-awakening', 'forest-stand', 'ink-dream']);
 
 assert.strictEqual(api.chapterStateAtTime(0).index, 0, 'the journey must open in the desert lullaby');
@@ -53,6 +56,20 @@ const detailed = api.readAudio({
 assert.deepStrictEqual(Array.from(detailed.bands), [0.91, 0.82, 0.73, 0.64, 0.55, 0.46, 0.37, 0.28]);
 assert(detailed.beat >= 0.93, 'beat input must reach the calf stride and ground echoes');
 
+const firstFlightCue = api.flightCueFrame([0.92, 0.12, 0.08, 0.05, 0.03, 0.02, 0.01, 0], [0, 0, 0, 0, 0, 0, 0, 0], 0.9, 0, 0, 0, 0, 0, 1 / 60);
+assert(firstFlightCue.emitted && firstFlightCue.nextEventIndex === 1, 'a strong onset and beat must emit a flight direction cue');
+const cooledFlightCue = api.flightCueFrame([0.92, 0.12, 0.08, 0.05, 0.03, 0.02, 0.01, 0], [0.92, 0.12, 0.08, 0.05, 0.03, 0.02, 0.01, 0], 0.9, 0.9, firstFlightCue.cueAge, firstFlightCue.cooldown, firstFlightCue.nextEventIndex, firstFlightCue.lastDirection, 1 / 60);
+assert(!cooledFlightCue.emitted, 'flight cues must respect their cooldown between rhythmic turns');
+assert.strictEqual(api.flightDirectionForBand(0, 0, 0).x, -1, 'the first lane cue must choose a deterministic horizontal side');
+assert.strictEqual(api.flightDirectionForBand(0, 1, -1).x, 1, 'successive cues must avoid repeating the same horizontal side');
+
+const cowBounds = api.constants.flightBounds.cow;
+const cowLoop = api.flightLoopBounds(cowBounds);
+const bounce = api.advanceFlyerMotion({ x: cowBounds.maxX - 0.01, y: 1 }, { x: 2, y: 0 }, 0.1, cowBounds, cowLoop);
+assert(bounce.bouncedX && bounce.position.x === cowBounds.maxX && bounce.velocity.x < 0, 'visible air walls must reflect a flyer before it leaves the frame');
+const wrap = api.advanceFlyerMotion({ x: cowLoop.maxX - 0.01, y: 1 }, { x: 2, y: 0 }, 0.1, cowBounds, cowLoop);
+assert(wrap.wrapped && wrap.position.x === cowLoop.minX, 'flyers must recycle through an unseen loop boundary');
+
 assert(loader.includes("'niulai-dream-preset.js'"), 'Niu Lai Dream must load before the main loop');
 assert(/MAX_VISUAL_PRESET_INDEX = 10/.test(core) && /NIULAI_PRESET_INDEX = 10/.test(core), 'preset 10 must survive persistence clamps');
 assert(presets.includes("name: '牛来'") && presets.includes('作者 <span class="pc-author-cyberforker">Cyberforker</span>'), 'the preset card must credit Cyberforker');
@@ -66,6 +83,8 @@ assert(/setVisualSuppressed\(highwayPresetActiveEarly \|\| niulaiPresetActiveEar
 assert(/niulai-low-poly-calf/.test(source) && /new THREE\.SphereGeometry\(1, 10, 7\)/.test(source), 'the calf must be a real low-poly 3D model');
 assert(/niulai-red-cape/.test(source) && /createCape/.test(source), 'the calf must retain its animated red cape silhouette');
 assert(/niulai-low-poly-lark/.test(source) && /niulai-lark-wing-left/.test(source), 'the dream must include the flying lark');
+assert(/FLIGHT_FLYER_COUNT/.test(source) && /registerFlyer/.test(source) && /advanceFlyerMotion/.test(source), 'the dream must use a bounded reusable flight pool');
+assert(/child\.frustumCulled = true/.test(source) && /if \(!flyer\.active \|\| !flyer\.object\) return/.test(source), 'flight updates must be explicit and limited to active pooled models');
 assert(/niulai-ink-dream-gate/.test(source) && /new THREE\.TorusGeometry/.test(source), 'the scene must include an independent 3D ink-dream gate');
 assert(/new THREE\.InstancedMesh/.test(source), 'repeated scenery must use bounded instanced geometry');
 assert(/frameOpacity != null && isFinite\(frameOpacity\)/.test(source), 'static model materials must not treat a missing frame opacity as transparent zero');

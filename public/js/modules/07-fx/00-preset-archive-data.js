@@ -9,7 +9,7 @@ var presetMeta = [
   { name: '安魂', desc: '骷髅·YUI7W', descHtml: '骷髅·<span class="pc-yui7w">YUI7W</span>' },
   { name: '音域回响', nameHtml: '音域回响 <span class="pc-name-en">Sonic-Topography</span>', desc: '作者 Ajin', descHtml: '作者 <span class="pc-author-ajin">Ajin</span>' },
   { name: '音域回响', nameHtml: '音域回响 <span class="pc-name-en">Wallpaper Engine</span>', desc: '作者 CmzYa' },
-  { name: '无尽公路', nameHtml: '无尽公路 <span class="pc-name-en">Highway Drive</span>', desc: '世界沿线 · 动态天气' },
+  { name: '无尽公路', nameHtml: '无尽公路 <span class="pc-name-en">Highway Drive</span>', desc: '作者 Cyberforker', descHtml: '作者 <span class="pc-author-cyberforker">Cyberforker</span>' },
   { name: '牛来', nameHtml: '牛来 <span class="pc-name-en">Dream Migration</span>', desc: '作者 Cyberforker', descHtml: '作者 <span class="pc-author-cyberforker">Cyberforker</span>' },
 ];
 var presetIcons = [
